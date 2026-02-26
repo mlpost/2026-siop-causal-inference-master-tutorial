@@ -39,16 +39,14 @@ Open a notebook and run this cell: <br>
 !! Be sure to insert your own username in the URL below !!
 
 ```python
-import os
-
 # Clone the repo
-if not os.path.exists('causal-inference-people-analytics'):
-    !git clone [https://github.com/YOUR_USERNAME/causal-inference-people-analytics.git](https://github.com/mlpost/2026-siop-causal-inference-master-tutorial.git)
+import os
+if not os.path.exists('2026-siop-causal-inference-master-tutorial'):
+  !git clone https://github.com/mlpost/2026-siop-causal-inference-master-tutorial.git
 
-# Install pinned dependencies
-!pip install -q -r causal-inference-people-analytics/requirements.txt
+!pip install -q -r 2026-siop-causal-inference-master-tutorial/requirements.txt
 
 # Add source code to path
 import sys
-sys.path.insert(0, 'causal-inference-people-analytics/src')
+sys.path.insert(0, '2026-siop-causal-inference-master-tutorial')
 ```
