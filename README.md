@@ -36,7 +36,6 @@ https://colab.research.google.com/
 ### Step 2: Clone this Repo
 
 Open a notebook and run this cell: <br>
-!! Be sure to insert your own username in the URL below !!
 
 ```python
 # Clone the repo
@@ -49,4 +48,7 @@ if not os.path.exists('2026-siop-causal-inference-master-tutorial'):
 # Add source code to path
 import sys
 sys.path.insert(0, '2026-siop-causal-inference-master-tutorial')
+
+# If needed: delete the repo
+# !rm -rf 2026-siop-causal-inference-master-tutorial
 ```
