@@ -11,7 +11,8 @@ Design: Open enrollment - voluntary participation with self-selection bias
 - Control: ~8,500 managers who did not participate
 - Self-selection driven by Organization and performance rating
 - No Below / Far Below performers are treated
-- ~25 % of managers are new (no prior manager-level baseline scores)
+- ~25 % of managers are new (baseline_manager_efficacy set to 0)
+- Managers grouped into within-organization teams (team_id) for clustered SEs
 
 Key differences vs Scenario 1 (staggered RCT):
 - Treatment is NOT randomised - covariates are imbalanced
@@ -39,8 +40,6 @@ np.random.seed(SEED)
 # Sample sizes
 N_TOTAL = 9000
 N_TREATED_TARGET = 500          # approximate - calibrated via propensity model
-MIN_TEAM_SIZE = 5
-MAX_TEAM_SIZE = 12
 
 # Demographics categories (same as S1)
 REGIONS = ['North America', 'Europe', 'Asia Pacific', 'Latin America', 'Middle East & Africa']
@@ -63,7 +62,6 @@ print("LEADERSHIP DEVELOPMENT PROGRAM - SCENARIO 2 MOCK DATA GENERATOR")
 print("=" * 80)
 print(f"\nSeed: {SEED}")
 print(f"Total Managers: {N_TOTAL} (target ~{N_TREATED_TARGET} treated)")
-print(f"Expected Direct Reports: ~{N_TOTAL * 8} (team sizes {MIN_TEAM_SIZE}-{MAX_TEAM_SIZE})")
 
 # ============================================================================
 # SECTION 2: GENERATE MANAGER-LEVEL DEMOGRAPHICS
@@ -116,16 +114,16 @@ def generate_baseline(base_mean, base_sd, n):
     scores = np.random.normal(base_mean, base_sd, n)
     return np.clip(np.round(scores, 1), SURVEY_MIN, SURVEY_MAX)
 
-# Manager-level baselines (NaN for new managers)
+# Manager-level baselines (0 for new managers)
 baseline_manager_efficacy_raw = generate_baseline(3.3, 0.85, N_TOTAL)
 
-baseline_manager_efficacy = np.where(is_new_manager == 1, np.nan, baseline_manager_efficacy_raw)
+baseline_manager_efficacy = np.where(is_new_manager == 1, 0, baseline_manager_efficacy_raw)
 
 # Individual-level baselines (all managers have these - measured as IC before promotion)
 baseline_workload           = generate_baseline(3.1, 0.95, N_TOTAL)
 baseline_turnover_intention = generate_baseline(2.7, 1.00, N_TOTAL)
 
-print(f"  baseline_manager_efficacy : {np.nanmean(baseline_manager_efficacy):.2f} (NaN count: {np.isnan(baseline_manager_efficacy).sum()})")
+print(f"  baseline_manager_efficacy : {baseline_manager_efficacy.mean():.2f} (zero count: {(baseline_manager_efficacy == 0).sum()})")
 print(f"  baseline_workload         : {baseline_workload.mean():.2f}")
 print(f"  baseline_turnover_intention: {baseline_turnover_intention.mean():.2f}")
 
@@ -342,11 +340,46 @@ print("  [OK] Retention monotonicity verified")
 # SECTION 8: ASSEMBLE MANAGER DATAFRAME
 # ============================================================================
 
-# Generate team sizes here so they can be included in manager df AND used for DR expansion
-team_sizes = np.random.randint(MIN_TEAM_SIZE, MAX_TEAM_SIZE + 1, N_TOTAL)
+# --- num_direct_reports: how many direct reports each manager has (5-12) ---
+num_direct_reports = np.random.randint(5, 13, N_TOTAL)
+
+# --- tot_span_of_control: total span >= num_direct_reports, range 5-50 ---
+# Most managers have a modest indirect span; some have a very large one
+extra_span = np.random.gamma(2, 5, N_TOTAL).round().astype(int)
+tot_span_of_control = np.clip(num_direct_reports + extra_span, num_direct_reports, 50).astype(int)
+
+# --- team_id: group managers into within-organization teams of 5-12 ---
+team_ids = np.zeros(N_TOTAL, dtype=int)
+team_counter = 1
+for org in ORGANIZATIONS:
+    org_idx = np.where(organizations == org)[0]
+    np.random.shuffle(org_idx)
+    i = 0
+    while i < len(org_idx):
+        remaining = len(org_idx) - i
+        if remaining <= 12:
+            size = remaining
+        else:
+            max_size = min(12, remaining - 5)
+            size = np.random.randint(5, max_size + 1)
+        team_ids[org_idx[i:i + size]] = team_counter
+        team_counter += 1
+        i += size
+
+n_teams = team_counter - 1
+team_sizes_check = pd.Series(team_ids).value_counts()
+print(f"\n[OK] Generated {n_teams} teams (within-org, size range: "
+      f"{team_sizes_check.min()}-{team_sizes_check.max()})")
+print(f"  num_direct_reports range: {num_direct_reports.min()}-{num_direct_reports.max()}, "
+      f"mean: {num_direct_reports.mean():.1f}")
+print(f"  tot_span_of_control range: {tot_span_of_control.min()}-{tot_span_of_control.max()}, "
+      f"mean: {tot_span_of_control.mean():.1f}")
+assert (tot_span_of_control >= num_direct_reports).all(), \
+    "ERROR: tot_span_of_control < num_direct_reports!"
 
 df_managers = pd.DataFrame({
-    'manager_id': manager_ids,
+    'id': manager_ids,
+    'team_id': team_ids,
     'treatment': treatment,
     'region': regions,
     'organization': organizations,
@@ -356,7 +389,8 @@ df_managers = pd.DataFrame({
     'age': ages,
     'tenure_months': tenures,
     'is_new_manager': is_new_manager,
-    'team_size': team_sizes,
+    'num_direct_reports': num_direct_reports,
+    'tot_span_of_control': tot_span_of_control,
     'baseline_manager_efficacy': baseline_manager_efficacy,
     'baseline_workload': baseline_workload,
     'baseline_turnover_intention': baseline_turnover_intention,
@@ -371,136 +405,6 @@ df_managers = pd.DataFrame({
 })
 
 print(f"\n[OK] Manager dataframe assembled: {df_managers.shape}")
-
-# ============================================================================
-# SECTION 9: GENERATE DIRECT REPORT DATA
-# ============================================================================
-
-print("\n" + "=" * 80)
-print("GENERATING DIRECT REPORT DATA")
-print("=" * 80)
-
-# team_sizes already generated in Section 8 (same array used here for DR expansion)
-total_dr = team_sizes.sum()
-
-print(f"Total direct reports: {total_dr}")
-print(f"Average team size: {team_sizes.mean():.1f}")
-print(f"  Treated DRs : ~{team_sizes[treatment == 1].sum()}")
-print(f"  Control DRs : ~{team_sizes[treatment == 0].sum()}")
-
-# Repeat manager-level info for each DR
-dr_manager_ids     = np.repeat(manager_ids, team_sizes)
-dr_treatment       = np.repeat(treatment, team_sizes)
-dr_is_new_manager  = np.repeat(is_new_manager, team_sizes)
-
-# DR demographics (random - not linked to manager)
-dr_regions     = np.random.choice(REGIONS, size=total_dr)
-dr_orgs        = np.random.choice(ORGANIZATIONS, size=total_dr)
-dr_jobs        = np.random.choice(JOB_FAMILIES, size=total_dr)
-dr_performance = np.random.choice(PERFORMANCE_RATINGS, size=total_dr, p=perf_probs)
-dr_genders     = np.random.choice(GENDERS, size=total_dr, p=gender_probs)
-dr_ages        = np.random.normal(35, 8, total_dr).clip(22, 65).round().astype(int)
-dr_tenures     = np.random.gamma(4, 6, total_dr).clip(1, 120).round().astype(int)
-
-# DR-level baselines (prior year) - independent draws
-baseline_workload_dr = generate_baseline(3.2, 0.95, total_dr)
-baseline_turnover_intention_dr = generate_baseline(2.6, 1.00, total_dr)
-
-# baseline_manager_support_dr: used as baseline for manager_support outcome
-# NaN if the manager is new (manager didn't have DRs last year)
-baseline_manager_support_dr_raw = generate_baseline(3.4, 0.90, total_dr)
-baseline_manager_support_dr = np.where(dr_is_new_manager == 1, np.nan,
-                                       baseline_manager_support_dr_raw)
-
-# ============================================================================
-# SECTION 10: GENERATE DIRECT REPORT OUTCOMES (WITH CLUSTERING)
-# ============================================================================
-
-print("\nGenerating direct report outcomes with clustering...")
-
-def generate_clustered_outcome_with_baseline(
-        base_mean, base_sd, treatment_effect_d,
-        treatment, manager_ids, baseline, baseline_r=0.45,
-        icc=0.15):
-    """
-    Generate a clustered survey outcome (1-5) with manager random effects,
-    a prior-year baseline predictor, and a treatment effect.
-    """
-    n_obs = len(treatment)
-    unique_mgrs = np.unique(manager_ids)
-    n_mgrs = len(unique_mgrs)
-
-    # Variance components
-    total_var   = base_sd ** 2
-    between_var = total_var * icc
-    within_var  = total_var * (1 - icc)
-
-    # Manager random effects
-    mgr_effects = np.random.normal(0, np.sqrt(between_var), n_mgrs)
-    mgr_effect_map = dict(zip(unique_mgrs, mgr_effects))
-    obs_mgr_effects = np.array([mgr_effect_map[m] for m in manager_ids])
-
-    # Baseline component
-    bl_filled = np.where(np.isnan(baseline), np.nanmean(baseline), baseline)
-    bl_centered = bl_filled - np.nanmean(baseline)
-    baseline_component = baseline_r * bl_centered
-
-    # Treatment effect
-    treat_effect = treatment_effect_d * base_sd * treatment
-
-    # Individual residual
-    residual_sd = np.sqrt(within_var * (1 - baseline_r ** 2))
-    noise = np.random.normal(0, residual_sd, n_obs)
-
-    scores = base_mean + baseline_component + treat_effect + obs_mgr_effects + noise
-    return np.clip(np.round(scores, 1), SURVEY_MIN, SURVEY_MAX)
-
-
-# Manager Support Index: d  0.25, significant, small
-manager_support_dr = generate_clustered_outcome_with_baseline(
-    base_mean=3.5, base_sd=0.95, treatment_effect_d=0.25,
-    treatment=dr_treatment, manager_ids=dr_manager_ids,
-    baseline=baseline_manager_support_dr_raw, baseline_r=0.45, icc=0.15
-)
-print("  [OK] manager_support_index  (d0.25, sig)")
-
-# Workload Index (DR): d  0.25, significant, small
-workload_dr = generate_clustered_outcome_with_baseline(
-    base_mean=3.3, base_sd=1.00, treatment_effect_d=0.25,
-    treatment=dr_treatment, manager_ids=dr_manager_ids,
-    baseline=baseline_workload_dr, baseline_r=0.40, icc=0.12
-)
-print("  [OK] workload_index_dr      (d0.25, sig)")
-
-# Turnover Intention Index (DR): d  0.01, non-significant
-# (Training effect doesn't meaningfully cascade to DR turnover intentions)
-turnover_intention_dr = generate_clustered_outcome_with_baseline(
-    base_mean=2.7, base_sd=1.05, treatment_effect_d=0.01,
-    treatment=dr_treatment, manager_ids=dr_manager_ids,
-    baseline=baseline_turnover_intention_dr, baseline_r=0.45, icc=0.10
-)
-print("  [OK] turnover_intention_dr  (d0.01, ns)")
-
-# Assemble DR dataframe
-df_direct_reports = pd.DataFrame({
-    'direct_report_id': np.arange(1, total_dr + 1),
-    'manager_id': dr_manager_ids,
-    'treatment': dr_treatment,
-    'region': dr_regions,
-    'organization': dr_orgs,
-    'job_family': dr_jobs,
-    'performance_rating': dr_performance,
-    'gender': dr_genders,
-    'age': dr_ages,
-    'tenure_months': dr_tenures,
-    'baseline_workload_dr': baseline_workload_dr,
-    'baseline_turnover_intention_dr': baseline_turnover_intention_dr,
-    'manager_support_index': manager_support_dr,
-    'workload_index_dr': workload_dr,
-    'turnover_intention_index_dr': turnover_intention_dr,
-})
-
-print(f"\n[OK] Direct report dataframe assembled: {df_direct_reports.shape}")
 
 # ============================================================================
 # SECTION 11: VERIFICATION - SELECTION PATTERNS
@@ -559,7 +463,7 @@ t_df = df_managers[df_managers['treatment'] == 1]
 c_df = df_managers[df_managers['treatment'] == 0]
 
 smd_results = []
-for var in ['age', 'tenure_months', 'team_size'] + bl_vars:
+for var in ['age', 'tenure_months', 'num_direct_reports', 'tot_span_of_control'] + bl_vars:
     s = smd_continuous(t_df[var].dropna(), c_df[var].dropna())
     flag_str = '  *** IMBALANCED' if abs(s) > 0.10 else ''
     print(f"  {var:35s}  SMD = {s:+.3f}{flag_str}")
@@ -606,15 +510,6 @@ for outcome in survey_outcomes_mgr:
     print(f"    Treated:  {t.mean():.2f}  {t.std():.2f}")
     print(f"    Control:  {c.mean():.2f}  {c.std():.2f}")
 
-print("\n--- DIRECT REPORT OUTCOMES ---")
-survey_outcomes_dr = ['manager_support_index', 'workload_index_dr', 'turnover_intention_index_dr']
-for outcome in survey_outcomes_dr:
-    t = df_direct_reports[df_direct_reports['treatment'] == 1][outcome]
-    c = df_direct_reports[df_direct_reports['treatment'] == 0][outcome]
-    print(f"  {outcome}:")
-    print(f"    Treated:  {t.mean():.2f}  {t.std():.2f}")
-    print(f"    Control:  {c.mean():.2f}  {c.std():.2f}")
-
 # ============================================================================
 # SECTION 13: VERIFICATION - STATISTICAL TESTS
 # ============================================================================
@@ -643,17 +538,6 @@ for outcome in ['retention_3month', 'retention_6month', 'retention_9month', 'ret
     model.fit(X, y)
     or_val = np.exp(model.coef_[0][0])
     print(f"  {outcome}:  OR = {or_val:.2f}")
-
-print("\n--- DIRECT REPORT OUTCOMES (t-tests, ignoring clustering) ---")
-print("  Note: proper analysis requires GEE to account for clustering.\n")
-for outcome in survey_outcomes_dr:
-    t = df_direct_reports[df_direct_reports['treatment'] == 1][outcome]
-    c = df_direct_reports[df_direct_reports['treatment'] == 0][outcome]
-    t_stat, p_val = stats.ttest_ind(t, c)
-    d = smd_continuous(t, c)
-    sig = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else 'ns'
-    print(f"  {outcome}:")
-    print(f"    Cohen's d = {d:.3f},  t = {t_stat:.2f},  p = {p_val:.4f}  {sig}")
 
 # R&D heterogeneity check (Manager Efficacy)
 print("\n--- R&D HETEROGENEITY CHECK (Manager Efficacy) ---")
@@ -701,11 +585,9 @@ print("EXPORTING DATA")
 print("=" * 80)
 
 df_managers.to_csv('./data/s2_manager_data.csv', index=False)
-df_direct_reports.to_csv('./data/s2_direct_report_data.csv', index=False)
 
 print("\n[OK] Data exported to:")
 print("  - ./data/s2_manager_data.csv")
-print("  - ./data/s2_direct_report_data.csv")
 
 # ============================================================================
 # SECTION 15: EXCEL REPORT
@@ -857,7 +739,6 @@ readme_lines = [
     ("Design", BOLD_FONT),
     (f" Treated group: {n_treated_actual} managers who voluntarily enrolled (Jan-Mar)", None),
     (f" Control pool : {n_control_actual} managers who did not participate", None),
-    (f" Total direct reports: {total_dr} (team sizes {MIN_TEAM_SIZE}-{MAX_TEAM_SIZE})", None),
     (f" ~{int(is_new_manager.sum())} managers flagged as new (no prior manager-level baselines)", None),
     (" Self-selection driven by: Organisation, performance rating", None),
     (" Seed for reproducibility: 42", None),
@@ -865,7 +746,7 @@ readme_lines = [
     ("Key Difference vs Scenario 1", BOLD_FONT),
     (" Treatment is NOT randomised - covariates are imbalanced", None),
     (" Prior-year baseline scores included as controls for outcomes", None),
-    (" New managers have NaN for baseline_manager_efficacy", None),
+    (" New managers have 0 for baseline_manager_efficacy", None),
     (" No Below / Far Below performers are treated", None),
     ("", None),
     ("Sheets in This Workbook", BOLD_FONT),
@@ -874,14 +755,10 @@ readme_lines = [
     (" Covariate_Balance - SMDs for all covariates (pre-weighting)", None),
     (" PS_Summary - Propensity score distribution statistics", None),
     (" Manager_Descriptives - Descriptive stats by treatment group", None),
-    (" DR_Descriptives - Direct report descriptive stats by treatment group", None),
     (" Retention_Summary - Retention rates at 3, 6, 9, 12 months with chi-square tests", None),
     (" Period_Turnover_Rates - Period-specific turnover rates", None),
     (" Manager_Outcomes - Manager survey outcomes with Cohen's d and t-test p-values", None),
-    (" DR_Outcomes - Direct report survey outcomes with Cohen's d and t-test p-values", None),
-    (" Team_Size_Distribution - Team size distribution statistics", None),
     (" Raw_Managers - Full manager-level dataset", None),
-    (" Raw_Direct_Reports - Full direct-report-level dataset", None),
     ("", None),
     ("Formatting Key", BOLD_FONT),
     (" p-value cells: Green (p < .05), Yellow (.05 <= p < .10), Red (p >= .10)", None),
@@ -961,7 +838,8 @@ write_title(ws_cov, 1, "Covariate Balance  Standardised Mean Differences (Pre-We
 
 cov_bal_rows = []
 # Continuous
-for var in ['age', 'tenure_months', 'team_size', 'baseline_manager_efficacy', 'baseline_workload',
+for var in ['age', 'tenure_months', 'num_direct_reports', 'tot_span_of_control',
+            'baseline_manager_efficacy', 'baseline_workload',
             'baseline_turnover_intention']:
     tv = t_df[var].dropna()
     cv = c_df[var].dropna()
@@ -1024,7 +902,7 @@ print("  [OK] PS_Summary")
 
 # ===== SHEET 5: Manager_Descriptives ========================================
 ws_mgr_desc = wb.create_sheet("Manager_Descriptives")
-mgr_cont_vars = ['age', 'tenure_months', 'team_size',
+mgr_cont_vars = ['age', 'tenure_months', 'num_direct_reports', 'tot_span_of_control',
                   'baseline_manager_efficacy', 'baseline_workload',
                   'baseline_turnover_intention',
                   'manager_efficacy_index', 'workload_index_mgr', 'turnover_intention_index_mgr']
@@ -1034,18 +912,7 @@ write_df(ws_mgr_desc, df_mgr_desc, start_row=3)
 auto_fit_columns(ws_mgr_desc)
 print("  [OK] Manager_Descriptives")
 
-# ===== SHEET 6: DR_Descriptives =============================================
-ws_dr_desc = wb.create_sheet("DR_Descriptives")
-dr_cont_vars = ['age', 'tenure_months',
-                 'baseline_workload_dr', 'baseline_turnover_intention_dr',
-                 'manager_support_index', 'workload_index_dr', 'turnover_intention_index_dr']
-df_dr_desc = descriptives_by_group(df_direct_reports, dr_cont_vars)
-write_title(ws_dr_desc, 1, "Direct Report-Level Descriptive Statistics", max_col=len(df_dr_desc.columns))
-write_df(ws_dr_desc, df_dr_desc, start_row=3)
-auto_fit_columns(ws_dr_desc)
-print("  [OK] DR_Descriptives")
-
-# ===== SHEET 7: Retention_Summary ===========================================
+# ===== SHEET 6: Retention_Summary ===========================================
 ws_ret = wb.create_sheet("Retention_Summary")
 write_title(ws_ret, 1, "Retention Rates by Treatment Group with Chi-Square Tests", max_col=10)
 
@@ -1148,79 +1015,12 @@ apply_pvalue_conditional(ws_mgr_out, pval_col, 4, end_r)
 auto_fit_columns(ws_mgr_out)
 print("  [OK] Manager_Outcomes")
 
-# ===== SHEET 10: DR_Outcomes ================================================
-ws_dr_out = wb.create_sheet("DR_Outcomes")
-write_title(ws_dr_out, 1, "Direct Report-Level Survey Outcomes  Treatment vs Control", max_col=10)
-
-dr_out_rows = []
-for outcome in survey_outcomes_dr:
-    t_vals = df_direct_reports[df_direct_reports['treatment'] == 1][outcome]
-    c_vals = df_direct_reports[df_direct_reports['treatment'] == 0][outcome]
-    t_stat, p_val = stats.ttest_ind(t_vals, c_vals)
-    d = smd_continuous(t_vals, c_vals)
-    dr_out_rows.append({
-        'Outcome': outcome,
-        'Treated n': len(t_vals), 'Treated Mean': round(t_vals.mean(), 3),
-        'Treated SD': round(t_vals.std(), 3),
-        'Control n': len(c_vals), 'Control Mean': round(c_vals.mean(), 3),
-        'Control SD': round(c_vals.std(), 3),
-        "Cohen's d": round(d, 3),
-        't-statistic': round(t_stat, 3), 'p-value': round(p_val, 4),
-    })
-df_dr_out = pd.DataFrame(dr_out_rows)
-end_r = write_df(ws_dr_out, df_dr_out, start_row=3)
-pval_col = get_column_letter(10)
-apply_pvalue_conditional(ws_dr_out, pval_col, 4, end_r)
-auto_fit_columns(ws_dr_out)
-print("  [OK] DR_Outcomes")
-
-# ===== SHEET 11: Team_Size_Distribution =====================================
-ws_team = wb.create_sheet("Team_Size_Distribution")
-write_title(ws_team, 1, "Team Size Distribution Across Managers", max_col=5)
-
-team_s = pd.Series(team_sizes)
-team_summary = pd.DataFrame([
-    {'Statistic': 'Min',                   'Value': int(team_s.min())},
-    {'Statistic': 'Max',                   'Value': int(team_s.max())},
-    {'Statistic': 'Mean',                  'Value': round(team_s.mean(), 2)},
-    {'Statistic': 'SD',                    'Value': round(team_s.std(), 2)},
-    {'Statistic': 'Median',                'Value': round(team_s.median(), 1)},
-    {'Statistic': 'Total Direct Reports',  'Value': int(team_s.sum())},
-    {'Statistic': 'Total Managers',        'Value': int(len(team_s))},
-])
-end_r = write_df(ws_team, team_summary, start_row=3)
-
-freq = team_s.value_counts().sort_index()
-freq_df = pd.DataFrame({
-    'Team Size': freq.index.astype(int),
-    'Count': freq.values.astype(int),
-    '% of Managers': (freq.values / len(team_s) * 100).round(1),
-    'Cumulative %': (freq.values.cumsum() / len(team_s) * 100).round(1),
-})
-total_row = pd.DataFrame([{
-    'Team Size': 'Total', 'Count': int(freq.values.sum()),
-    '% of Managers': 100.0, 'Cumulative %': 100.0
-}])
-freq_df = pd.concat([freq_df, total_row], ignore_index=True)
-
-write_title(ws_team, end_r + 2, "Frequency Table", max_col=4)
-write_df(ws_team, freq_df, start_row=end_r + 4)
-auto_fit_columns(ws_team)
-print("  [OK] Team_Size_Distribution")
-
-# ===== SHEET 12: Raw_Managers ===============================================
+# ===== SHEET 8: Raw_Managers ===============================================
 ws_raw_mgr = wb.create_sheet("Raw_Managers")
 write_title(ws_raw_mgr, 1, "Full Manager-Level Dataset", max_col=len(df_managers.columns))
 write_df(ws_raw_mgr, df_managers, start_row=3)
 auto_fit_columns(ws_raw_mgr)
 print("  [OK] Raw_Managers")
-
-# ===== SHEET 13: Raw_Direct_Reports =========================================
-ws_raw_dr = wb.create_sheet("Raw_Direct_Reports")
-write_title(ws_raw_dr, 1, "Full Direct Report-Level Dataset", max_col=len(df_direct_reports.columns))
-write_df(ws_raw_dr, df_direct_reports, start_row=3)
-auto_fit_columns(ws_raw_dr)
-print("  [OK] Raw_Direct_Reports")
 
 # ---------------------------------------------------------------------------
 # Save workbook
@@ -1233,6 +1033,5 @@ print("DATA GENERATION COMPLETE")
 print("=" * 80)
 print(f"\nFiles created:")
 print(f"  ./data/s2_manager_data.csv        ({df_managers.shape[0]} rows x {df_managers.shape[1]} cols)")
-print(f"  ./data/s2_direct_report_data.csv  ({df_direct_reports.shape[0]} rows x {df_direct_reports.shape[1]} cols)")
-print(f"  ./data/s2_data_descriptives.xlsx  (13 sheets)")
+print(f"  ./data/s2_data_descriptives.xlsx  (8 sheets)")
 

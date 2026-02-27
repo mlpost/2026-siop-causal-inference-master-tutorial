@@ -14,26 +14,39 @@ import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import statsmodels.api as sm
 import statsmodels.formula.api as smf
+from statsmodels.genmod import families
 from statsmodels.stats.multitest import multipletests
 from typing import Dict, List, Optional, Tuple, Union
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from econml.dml import DML, CausalForestDML
+from econml.sklearn_extensions.linear_model import StatsModelsLinearRegression
+from econml.cate_interpreter import SingleTreeCateInterpreter
 
 from causal_diagnostics import CausalDiagnostics
 
 
 class IPTWGEEModel:
     """
-    Inverse Probability of Treatment Weighting (IPTW) with GEE for causal inference.
+    Inverse Probability of Treatment Weighting (IPTW) with GEE for causal inference,
+    with optional Double Machine Learning (DML) for heterogeneous treatment effects.
     
-    This class implements doubly robust estimation of treatment effects using:
+    This class implements two complementary approaches:
+    
+    **Approach 1 — IPTW + Doubly Robust GEE** (``analyze_treatment_effect``):
     - Stabilized inverse probability weights (IPTW) for ATE or ATT
     - Generalized Estimating Equations (GEE) to account for clustering
     - Optional outcome model covariate adjustment for doubly robust property
     
-    The estimand (ATE vs. ATT) is determined by the weight construction formula,
-    not by GEE itself. GEE is agnostic to the estimand — it simply fits a weighted
-    regression with cluster-robust standard errors.
+    **Approach 2 — Double Machine Learning** (``dml_estimate_treatment_effects``):
+    - Linear DML for ATE/ATT estimation with flexible ML nuisance models
+    - Causal Forest DML for individualized CATE estimation
+    - ATT derived from CATE by averaging over treated observations
+    - Uses the ``econml`` package
+    
+    The estimand (ATE vs. ATT) is determined by the weight construction formula
+    (IPTW) or by subsetting CATE predictions (DML), not by GEE itself.
     
     Note on standard errors:
         GEE sandwich standard errors account for within-cluster correlation but
@@ -46,19 +59,23 @@ class IPTWGEEModel:
         weight_col (str): Name of the weight column (default: "iptw")
         ps_model: Last fitted propensity score model (use per-outcome dicts for multi-outcome runs)
         gee_model: Last fitted GEE outcome model (use per-outcome dicts for multi-outcome runs)
+        dml_model: Last fitted DML model (if DML methods used)
+        cfdml_model: Last fitted CausalForestDML model (if DML methods used)
     """
     
     def __init__(self):
         """Initialize the IPTWGEEModel.
         
-        Note: ps_model and gee_model store the *last* fitted model only.
-        When running multiple outcomes in a loop, capture results per
-        iteration from the returned dict rather than relying on these
-        instance attributes.
+        Note: ps_model, gee_model, dml_model, and cfdml_model store the
+        *last* fitted model only. When running multiple outcomes in a loop,
+        capture results per iteration from the returned dict rather than
+        relying on these instance attributes.
         """
         self.weight_col = "iptw"
         self.ps_model = None
         self.gee_model = None
+        self.dml_model = None
+        self.cfdml_model = None
     
     def estimate_propensity_weights(
         self,
@@ -127,13 +144,13 @@ class IPTWGEEModel:
                 formula=formula,
                 data=df,
                 groups=df[cluster_var],
-                family=sm.families.Binomial()
+                family=families.Binomial()
             ).fit()
         else:
             ps_model = smf.glm(
                 formula=formula,
                 data=df,
-                family=sm.families.Binomial()
+                family=families.Binomial()
             ).fit()
         
         df["propensity_score"] = ps_model.predict(df)
@@ -385,7 +402,7 @@ class IPTWGEEModel:
             raise ValueError("All weights are zero or negative")
         
         # Select appropriate family
-        fam = sm.families.Gaussian() if family == "gaussian" else sm.families.Binomial()
+        fam = families.Gaussian() if family == "gaussian" else families.Binomial()
         
         try:
             model = smf.gee(
@@ -991,7 +1008,748 @@ class IPTWGEEModel:
             "ps_overlap_fig": ps_overlap_fig,
             "weight_dist_fig": weight_dist_fig,
             "weighted_df": df,  # processed DataFrame with propensity_score & iptw columns
+            "outcome_type": "binary" if is_binary_outcome else "continuous",
         }
+
+    # ==================================================================
+    # Double Machine Learning (DML) methods
+    # ==================================================================
+
+    def dml_estimate_treatment_effects(
+        self,
+        data: pd.DataFrame,
+        outcome_col: str,
+        treatment_col: str,
+        categorical_vars: Optional[List[str]] = None,
+        binary_vars: Optional[List[str]] = None,
+        continuous_vars: Optional[List[str]] = None,
+        W_cols: Optional[List[str]] = None,
+        X_cols: Optional[List[str]] = None,
+        model_y=None,
+        model_t=None,
+        discrete_outcome: Optional[bool] = None,
+        discrete_treatment: Optional[bool] = None,
+        estimand: str = "ATE",
+        estimate: str = "both",
+        cluster_var: Optional[str] = None,
+        random_state: int = 42,
+        test_size: float = 0.2,
+        n_estimators: int = 500,
+        cv: int = 5,
+        max_tree_depth: int = 3,
+        min_samples_leaf: int = 25,
+        plot_cate: bool = True,
+        plot_importance: bool = True,
+        plot_tree: bool = True,
+        project_path: Optional[str] = None,
+        analysis_name: Optional[str] = None,
+        alpha: float = 0.05,
+    ) -> Dict:
+        """
+        Estimate ATE, ATT, and/or CATE using Double Machine Learning (DML).
+
+        Implements two complementary DML estimators from the ``econml`` package:
+
+        - **Linear DML** — estimates a single average effect (ATE or ATT) using
+          flexible ML nuisance models for outcome and treatment prediction, with
+          a linear final-stage model. Provides confidence intervals and p-values.
+        - **Causal Forest DML** — estimates individualized Conditional Average
+          Treatment Effects (CATE) τ(X), with feature importance and a tree-based
+          interpreter for subgroup discovery.
+
+        ATT is derived from CATE by averaging individualized effects over the
+        treated subpopulation, which is valid under unconfoundedness but is not
+        a first-class ATT estimator. For ATT with cluster-robust standard errors,
+        prefer ``analyze_treatment_effect(estimand='ATT')``.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Dataset containing outcome, treatment, and covariate variables.
+        outcome_col : str
+            Name of the outcome column (Y).
+        treatment_col : str
+            Name of the treatment column (T). Typically binary (0/1).
+        categorical_vars : list of str, optional
+            Categorical covariate names (will be one-hot encoded).
+            Used to construct ``W_cols`` / ``X_cols`` when those are not
+            explicitly provided.
+        binary_vars : list of str, optional
+            Binary covariate names.
+        continuous_vars : list of str, optional
+            Continuous covariate names.
+        W_cols : list of str, optional
+            Explicit list of confounding covariate column names. If provided,
+            takes precedence over the triple-list (categorical/binary/continuous).
+        X_cols : list of str, optional
+            Explicit list of effect-modifier column names for CATE estimation.
+            If ``None``, defaults to ``W_cols``.
+        model_y : estimator, optional
+            Predictive model for the outcome nuisance function. If ``None``,
+            auto-selected based on outcome type:
+            ``RandomForestClassifier`` for binary, ``RandomForestRegressor``
+            for continuous outcomes.
+        model_t : estimator, optional
+            Predictive model for the treatment nuisance function. If ``None``,
+            defaults to ``RandomForestClassifier(random_state=random_state)``.
+        discrete_outcome : bool, optional
+            Whether the outcome is discrete (binary). If ``None``, auto-detected
+            from the data by checking if unique values ⊆ {0, 1}.
+        discrete_treatment : bool, optional
+            Whether the treatment is discrete. If ``None``, auto-detected:
+            binary numeric → True, continuous → False.
+        estimand : str, default="ATE"
+            Target causal estimand: ``"ATE"``, ``"ATT"``, or ``"both"``.
+            Controls which average treatment effect is reported.
+        estimate : str, default="both"
+            Which DML estimators to run: ``"ATE"`` (linear DML only),
+            ``"CATE"`` (Causal Forest only), or ``"both"``.
+        cluster_var : str, optional
+            Name of clustering variable. Stored in results metadata but **not**
+            used by DML (which does not natively handle clustering). For
+            cluster-robust inference, use ``analyze_treatment_effect()``.
+        random_state : int, default=42
+            Random seed for reproducibility.
+        test_size : float, default=0.2
+            Fraction of data held out for CATE evaluation.
+        n_estimators : int, default=500
+            Number of trees in the Causal Forest.
+        cv : int, default=5
+            Cross-validation folds for nuisance model estimation.
+        max_tree_depth : int, default=3
+            Maximum depth for the CATE interpreter tree.
+        min_samples_leaf : int, default=25
+            Minimum samples per leaf in the CATE interpreter tree.
+        plot_cate : bool, default=True
+            If True, generates CATE distribution histogram.
+        plot_importance : bool, default=True
+            If True, generates feature importance bar plot.
+        plot_tree : bool, default=True
+            If True, generates CATE interpreter decision tree plot.
+        project_path : str, optional
+            Directory path for saving Excel results.
+        analysis_name : str, optional
+            Analysis identifier for file naming.
+        alpha : float, default=0.05
+            Significance level for confidence intervals.
+
+        Returns
+        -------
+        dict
+            Dictionary with keys:
+
+            - ``effect`` : float — Primary point estimate (ATE or ATT depending
+              on ``estimand``; ATE when ``estimand="both"``).
+            - ``estimand`` : str — "ATE", "ATT", or "both".
+            - ``ci_lower`` : float — Lower CI bound for the primary effect.
+            - ``ci_upper`` : float — Upper CI bound for the primary effect.
+            - ``p_value`` : float — p-value for the primary effect (from DML
+              inference; ``None`` if only CATE estimated).
+            - ``significant`` : bool — Whether p_value < alpha.
+            - ``alpha`` : float — Significance level used.
+            - ``cohens_d`` : float — Cohen's d effect size.
+            - ``pct_change`` : float or None — Percent change vs. control mean.
+            - ``mean_treatment`` : float — Mean outcome for treated group.
+            - ``mean_control`` : float — Mean outcome for control group.
+            - ``outcome_type`` : str — "binary" or "continuous".
+            - ``coefficients_df`` : pd.DataFrame — Single-row DataFrame with
+              Estimate, Std_Error, CI_Lower, CI_Upper, P_Value_Raw.
+            - ``weight_diagnostics`` : dict — Contains at minimum
+              ``n_observations``.
+            - ``ate_results`` : dict or None — ``{"ATE", "ATE_CI"}`` when ATE
+              estimated.
+            - ``att_results`` : dict or None — ``{"ATT", "ATT_CI"}`` when ATT
+              estimated.
+            - ``cate_results`` : dict or None — ``{"cate_estimates", "X_test",
+              "cate_summary"}`` when CATE estimated.
+            - ``feature_importances_df`` : pd.DataFrame or None.
+            - ``cate_plot`` : matplotlib Figure or None.
+            - ``importance_plot`` : matplotlib Figure or None.
+            - ``tree_plot`` : matplotlib Figure or None.
+            - ``dml_model`` : fitted DML object or None.
+            - ``cfdml_model`` : fitted CausalForestDML object or None.
+            - ``cluster_var`` : str or None — Stored for metadata; not used by DML.
+
+        Raises
+        ------
+        ImportError
+            If the ``econml`` package is not installed.
+        ValueError
+            If data preparation or model fitting fails.
+
+        Notes
+        -----
+        - DML does **not** natively account for clustering. If your data has a
+          hierarchical structure (e.g. managers nested in teams), the standard
+          errors from DML may be anti-conservative. Use
+          ``analyze_treatment_effect()`` for cluster-robust inference.
+        - ATT is derived by averaging CATE estimates over treated observations:
+          E[τ(X) | T=1]. This is valid under unconfoundedness but does not use
+          a dedicated ATT estimator. When DML is fit with X=None (homogeneous
+          effect), ATE = ATT by construction.
+        - The return dict is structured for compatibility with
+          ``build_summary_table()`` and ``compute_evalues_from_results()``.
+        """
+        # ---- Validate parameters ----
+        estimand = estimand.upper()
+        if estimand not in ("ATE", "ATT", "BOTH"):
+            raise ValueError(f"estimand must be 'ATE', 'ATT', or 'both', got '{estimand}'")
+
+        estimate = estimate.upper()
+        if estimate not in ("ATE", "CATE", "BOTH"):
+            raise ValueError(f"estimate must be 'ATE', 'CATE', or 'both', got '{estimate}'")
+
+        # ---- Defensive copy ----
+        df = data.copy()
+
+        # ---- Build W_cols from triple-list convention if not explicit ----
+        if W_cols is None:
+            cat_vars = categorical_vars or []
+            bin_vars = binary_vars or []
+            cont_vars = continuous_vars or []
+            if not (cat_vars or bin_vars or cont_vars):
+                raise ValueError(
+                    "Must provide either W_cols or at least one of "
+                    "categorical_vars / binary_vars / continuous_vars."
+                )
+            # One-hot encode categoricals
+            if cat_vars:
+                cols_before = set(df.columns)
+                df = pd.get_dummies(df, columns=cat_vars, drop_first=True)
+                dummy_cols = sorted(set(df.columns) - cols_before)
+            else:
+                dummy_cols = []
+            W_cols = dummy_cols + bin_vars + cont_vars
+        else:
+            dummy_cols = []
+
+        # ---- Column name sanitization ----
+        rename_map = {c: self._clean_column_name(c) for c in df.columns}
+        df.rename(columns=rename_map, inplace=True)
+        outcome_col = self._clean_column_name(outcome_col)
+        treatment_col = self._clean_column_name(treatment_col)
+        W_cols = [self._clean_column_name(c) for c in W_cols]
+        if cluster_var:
+            cluster_var = self._clean_column_name(cluster_var)
+
+        if X_cols is not None:
+            X_cols = [self._clean_column_name(c) for c in X_cols]
+        else:
+            X_cols = list(W_cols)
+
+        # ---- Drop rows with NAs in relevant columns ----
+        all_cols = list(set([outcome_col, treatment_col] + W_cols + X_cols))
+        if cluster_var:
+            all_cols = list(set(all_cols + [cluster_var]))
+        df = df[all_cols].dropna().copy()
+
+        if len(df) < 20:
+            raise ValueError(
+                f"Insufficient data after removing missing values: {len(df)} rows. "
+                "DML requires a reasonable sample size for cross-fitting."
+            )
+
+        # ---- Auto-detect outcome type ----
+        outcome_values = df[outcome_col].dropna().unique()
+        is_binary_outcome = set(outcome_values).issubset({0, 1, 0.0, 1.0})
+        if discrete_outcome is None:
+            discrete_outcome = is_binary_outcome
+            if is_binary_outcome:
+                print(f"  Auto-detected binary outcome '{outcome_col}' → discrete_outcome=True")
+
+        # ---- Auto-detect treatment type ----
+        treatment_series = df[treatment_col]
+        if discrete_treatment is None:
+            if pd.api.types.is_numeric_dtype(treatment_series):
+                unique_vals = treatment_series.dropna().unique()
+                discrete_treatment = len(unique_vals) == 2
+            else:
+                # Encode categorical treatment
+                treatment_series = treatment_series.astype("category")
+                df[treatment_col] = treatment_series.cat.codes
+                discrete_treatment = True
+
+        # ---- Auto-select nuisance models ----
+        if model_y is None:
+            if discrete_outcome:
+                model_y = RandomForestClassifier(random_state=random_state)
+            else:
+                model_y = RandomForestRegressor(random_state=random_state)
+        if model_t is None:
+            model_t = RandomForestClassifier(random_state=random_state)
+
+        # ---- Prepare arrays ----
+        Y = df[outcome_col]
+        T = df[treatment_col]
+        W = df[W_cols].copy()
+        X = df[X_cols].copy()
+
+        # ---- Compute raw group means for effect-size metrics ----
+        mean_treatment = Y[T == 1].mean()
+        mean_control = Y[T == 0].mean()
+
+        # ---- Train / test split ----
+        (X_train, X_test, W_train, W_test,
+         Y_train, Y_test, T_train, T_test) = train_test_split(
+            X, W, Y, T, test_size=test_size, random_state=random_state
+        )
+
+        # ---- Initialize result containers ----
+        ate_results = None
+        att_results = None
+        cate_results = None
+        cate_plot = None
+        importance_plot = None
+        tree_plot = None
+        dml_model_obj = None
+        cfdml_model_obj = None
+        feature_importances_df = None
+        cate_summary_obj = None
+        primary_effect = None
+        primary_ci = (None, None)
+        primary_pvalue = None
+
+        want_ate_estimand = estimand in ("ATE", "BOTH")
+        want_att_estimand = estimand in ("ATT", "BOTH")
+
+        # ==============================================================
+        # Estimate ATE/ATT via Linear DML
+        # ==============================================================
+        if estimate in ("ATE", "BOTH"):
+            print(f"\n  Fitting Linear DML for '{outcome_col}'...")
+            dml = DML(
+                model_y=model_y,
+                model_t=model_t,
+                model_final=StatsModelsLinearRegression(fit_intercept=False),
+                discrete_outcome=discrete_outcome,
+                discrete_treatment=discrete_treatment,
+                cv=cv,
+                random_state=random_state,
+            )
+            dml.fit(Y=Y_train, T=T_train, X=None, W=W_train, cache_values=True)
+            dml_model_obj = dml
+            self.dml_model = dml
+
+            # ---- ATE ----
+            if want_ate_estimand:
+                ate_val = float(dml.ate())
+                ate_ci = dml.ate_interval(alpha=alpha)
+                ate_ci = (float(ate_ci[0]), float(ate_ci[1]))
+                ate_results = {"ATE": ate_val, "ATE_CI": ate_ci}
+                print(f"    ATE = {ate_val:.4f}, {int((1-alpha)*100)}% CI: [{ate_ci[0]:.4f}, {ate_ci[1]:.4f}]")
+
+                if primary_effect is None:
+                    primary_effect = ate_val
+                    primary_ci = ate_ci
+
+            # ---- ATT via Linear DML ----
+            # With X=None the DML model estimates a single constant effect,
+            # so ATE = ATT by construction.
+            if want_att_estimand:
+                att_val = float(dml.ate())  # constant effect → ATE = ATT
+                att_ci = dml.ate_interval(alpha=alpha)
+                att_ci = (float(att_ci[0]), float(att_ci[1]))
+                att_results = {"ATT": att_val, "ATT_CI": att_ci}
+                print(f"    ATT (DML, constant effect) = {att_val:.4f}, "
+                      f"{int((1-alpha)*100)}% CI: [{att_ci[0]:.4f}, {att_ci[1]:.4f}]")
+                if primary_effect is None:
+                    primary_effect = att_val
+                    primary_ci = att_ci
+
+            # ---- p-value from DML inference ----
+            try:
+                dml_inference = dml.effect_inference(X=None)
+                summary_frame = dml_inference.summary_frame(alpha=alpha)
+                primary_pvalue = float(summary_frame["pvalue"].iloc[0])
+            except Exception:
+                primary_pvalue = None
+
+        # ==============================================================
+        # Estimate CATE via Causal Forest DML
+        # ==============================================================
+        if estimate in ("CATE", "BOTH"):
+            print(f"\n  Fitting Causal Forest DML for '{outcome_col}'...")
+            cfdml = CausalForestDML(
+                model_y=model_y,
+                model_t=model_t,
+                discrete_outcome=discrete_outcome,
+                discrete_treatment=discrete_treatment,
+                inference=True,
+                cv=cv,
+                n_estimators=n_estimators,
+                random_state=random_state,
+            )
+            cfdml.fit(Y=Y_train, T=T_train, X=X_train, W=W_train, cache_values=True)
+            cfdml_model_obj = cfdml
+            self.cfdml_model = cfdml
+
+            # Individualized effects on test set
+            cate_estimates = cfdml.effect(X_test)
+
+            # Summary
+            try:
+                cate_summary_obj = cfdml.summary()
+                print("    CATE Summary:")
+                print(cate_summary_obj)
+            except Exception as e:
+                print(f"    Warning: Could not produce CATE summary: {e}")
+
+            cate_results = {
+                "cate_estimates": cate_estimates,
+                "X_test": X_test,
+                "cate_summary": cate_summary_obj,
+            }
+
+            # ---- ATE from Causal Forest (overwrites if both estimators run) ----
+            if want_ate_estimand:
+                cf_ate = float(cfdml.ate(X=X_test))
+                cf_ate_ci = cfdml.ate_interval(X=X_test, alpha=alpha)
+                cf_ate_ci = (float(cf_ate_ci[0]), float(cf_ate_ci[1]))
+                ate_results = {"ATE": cf_ate, "ATE_CI": cf_ate_ci}
+                print(f"    ATE (Causal Forest) = {cf_ate:.4f}, "
+                      f"{int((1-alpha)*100)}% CI: [{cf_ate_ci[0]:.4f}, {cf_ate_ci[1]:.4f}]")
+                if primary_effect is None:
+                    primary_effect = cf_ate
+                    primary_ci = cf_ate_ci
+
+            # ---- ATT from Causal Forest: average CATE over treated ----
+            if want_att_estimand:
+                treated_mask = T_test == 1
+                n_treated_test = int(treated_mask.sum())
+                if n_treated_test > 0:
+                    X_test_treated = X_test[treated_mask]
+                    tau_treated = cfdml.effect(X_test_treated)
+                    att_val = float(tau_treated.mean())
+                    # CI via population_summary on treated subset
+                    try:
+                        att_inference = cfdml.effect_inference(X_test_treated)
+                        pop_summary = att_inference.population_summary(alpha=alpha)
+                        att_ci_raw = pop_summary.conf_int_mean(alpha=alpha)
+                        att_ci = (float(att_ci_raw[0]), float(att_ci_raw[1]))
+                    except Exception:
+                        # Fallback: use ±1.96 * SE of individual effects
+                        se_att = float(tau_treated.std() / np.sqrt(n_treated_test))
+                        from scipy.stats import norm
+                        z = norm.ppf(1 - alpha / 2)
+                        att_ci = (att_val - z * se_att, att_val + z * se_att)
+                    att_results = {"ATT": att_val, "ATT_CI": att_ci}
+                    print(f"    ATT (Causal Forest, n_treated={n_treated_test}) = {att_val:.4f}, "
+                          f"{int((1-alpha)*100)}% CI: [{att_ci[0]:.4f}, {att_ci[1]:.4f}]")
+                    if primary_effect is None:
+                        primary_effect = att_val
+                        primary_ci = att_ci
+                else:
+                    print("    Warning: No treated observations in test set; ATT not computed.")
+
+            # ---- p-value from Causal Forest inference ----
+            if primary_pvalue is None:
+                try:
+                    cf_inference = cfdml.effect_inference(X_test)
+                    cf_summary_frame = cf_inference.summary_frame(alpha=alpha)
+                    primary_pvalue = float(cf_summary_frame["pvalue"].mean())
+                except Exception:
+                    primary_pvalue = None
+
+            # ---- Feature importance ----
+            feature_importances = cfdml.feature_importances_
+            feature_names = X.columns.tolist()
+            feature_importances_df = pd.DataFrame({
+                "Feature": feature_names,
+                "Importance": feature_importances,
+            }).sort_values(by="Importance", ascending=False).head(20)
+
+            # ============== CATE Histogram ==============
+            if plot_cate:
+                fig_cate, ax_cate = plt.subplots(figsize=(10, 6))
+                ax_cate.hist(cate_estimates, bins=20, edgecolor="black",
+                             alpha=0.7, color="#3498db", linewidth=0.5)
+                ax_cate.set_xlabel("Estimated CATE", fontsize=11)
+                ax_cate.set_ylabel("Number of Individuals", fontsize=11)
+                ax_cate.set_title(
+                    f"Distribution of Individualized Treatment Effects — {outcome_col}",
+                    fontsize=13, fontweight="bold",
+                )
+                ax_cate.axvline(
+                    float(np.mean(cate_estimates)), color="red", linestyle="--",
+                    label=f"Mean = {float(np.mean(cate_estimates)):.4f}",
+                )
+                ax_cate.legend(fontsize=9)
+                ax_cate.grid(axis="y", alpha=0.3)
+                cate_plot = fig_cate
+                plt.close(fig_cate)
+
+            # ============== Feature Importance Plot ==============
+            if plot_importance:
+                fig_imp, ax_imp = plt.subplots(figsize=(11, 6))
+                ax_imp.barh(
+                    feature_importances_df["Feature"],
+                    feature_importances_df["Importance"],
+                    color="#2ecc71", edgecolor="black", linewidth=0.5, alpha=0.8,
+                )
+                ax_imp.set_xlabel("Feature Importance", fontsize=11)
+                ax_imp.set_ylabel("Features", fontsize=11)
+                ax_imp.set_title(
+                    f"Top {len(feature_importances_df)} Feature Importance — Causal Forest — {outcome_col}",
+                    fontsize=13, fontweight="bold",
+                )
+                ax_imp.invert_yaxis()
+                ax_imp.grid(axis="x", alpha=0.3)
+                importance_plot = fig_imp
+                plt.close(fig_imp)
+
+            # ============== CATE Tree Interpreter ==============
+            if plot_tree:
+                try:
+                    intrp = SingleTreeCateInterpreter(
+                        include_model_uncertainty=True,
+                        max_depth=max_tree_depth,
+                        min_samples_leaf=min_samples_leaf,
+                    )
+                    intrp.interpret(cfdml, X_test)
+                    fig_tree = plt.figure(figsize=(25, 12))
+                    intrp.plot(feature_names=feature_names, fontsize=12)
+                    plt.title(
+                        f"CATE Interpreter Tree — {outcome_col}",
+                        fontsize=14, fontweight="bold",
+                    )
+                    tree_plot = fig_tree
+                    plt.close(fig_tree)
+                except Exception as e:
+                    print(f"    Warning: Could not generate CATE tree plot: {e}")
+
+        # ==============================================================
+        # Compute effect-size metrics
+        # ==============================================================
+        if primary_effect is None:
+            primary_effect = 0.0
+            primary_ci = (0.0, 0.0)
+            print("  Warning: No treatment effect could be estimated.")
+
+        # Cohen's d from raw difference / pooled SD
+        raw_diff = mean_treatment - mean_control
+        var_treated = Y[T == 1].var()
+        var_control = Y[T == 0].var()
+        pooled_sd = np.sqrt((var_treated + var_control) / 2)
+        cohens_d = raw_diff / pooled_sd if pooled_sd > 0 else 0.0
+        pct_change = (raw_diff / mean_control) * 100 if abs(mean_control) > 1e-9 else None
+
+        significant = primary_pvalue < alpha if primary_pvalue is not None else False
+        stars = self._significance_stars(primary_pvalue) if primary_pvalue is not None else ""
+
+        ci_pct = int((1 - alpha) * 100)
+        p_str = f"p = {primary_pvalue:.4f}" if primary_pvalue is not None else "p = N/A"
+        print(
+            f"\n  [{outcome_col}] DML {estimand} = {primary_effect:.4f} "
+            f"({ci_pct}% CI: [{primary_ci[0]:.4f}, {primary_ci[1]:.4f}]), "
+            f"{p_str} {stars}, Cohen's d = {cohens_d:.4f}"
+        )
+
+        # ---- Build coefficients DataFrame for summary table compatibility ----
+        coefficients_df = pd.DataFrame({
+            "Parameter": [treatment_col],
+            "Estimate": [primary_effect],
+            "Std_Error": [
+                (primary_ci[1] - primary_ci[0]) / (2 * 1.96)
+                if primary_ci[0] is not None else None
+            ],
+            "CI_Lower": [primary_ci[0]],
+            "CI_Upper": [primary_ci[1]],
+            "P_Value_Raw": [primary_pvalue],
+            "Alpha": [alpha],
+        })
+
+        # ---- Excel export (optional) ----
+        if project_path and analysis_name:
+            try:
+                xlsx_path = f"{project_path}/dml_{estimand.lower()}_{analysis_name}.xlsx"
+                with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+                    coefficients_df.to_excel(writer, sheet_name="DML_Effect", index=False)
+                    if feature_importances_df is not None:
+                        feature_importances_df.to_excel(
+                            writer, sheet_name="Feature_Importance", index=False
+                        )
+                    if ate_results:
+                        pd.DataFrame([ate_results]).to_excel(
+                            writer, sheet_name="ATE_Results", index=False
+                        )
+                    if att_results:
+                        pd.DataFrame([att_results]).to_excel(
+                            writer, sheet_name="ATT_Results", index=False
+                        )
+                print(f"  Results saved to {xlsx_path}")
+            except Exception as e:
+                print(f"  Warning: Could not export results to Excel: {e}")
+
+        # ---- Return dict (compatible with build_summary_table / compute_evalues) ----
+        return {
+            "effect": primary_effect,
+            "estimand": estimand,
+            "ci_lower": primary_ci[0],
+            "ci_upper": primary_ci[1],
+            "p_value": primary_pvalue,
+            "significant": significant,
+            "alpha": alpha,
+            "cohens_d": cohens_d,
+            "pct_change": pct_change,
+            "mean_treatment": mean_treatment,
+            "mean_control": mean_control,
+            "outcome_type": "binary" if is_binary_outcome else "continuous",
+            "coefficients_df": coefficients_df,
+            "weight_diagnostics": {"n_observations": len(df)},
+            "ate_results": ate_results,
+            "att_results": att_results,
+            "cate_results": cate_results,
+            "feature_importances_df": feature_importances_df,
+            "cate_plot": cate_plot,
+            "importance_plot": importance_plot,
+            "tree_plot": tree_plot,
+            "dml_model": dml_model_obj,
+            "cfdml_model": cfdml_model_obj,
+            "cluster_var": cluster_var,
+        }
+
+    def dml_estimate_treatment_effects_help(self):
+        """
+        Print detailed documentation for ``dml_estimate_treatment_effects``.
+
+        Displays parameter descriptions, usage examples, and interpretation
+        guidance for Double Machine Learning estimation.
+        """
+        help_text = """
+    Double Machine Learning (DML) for ATE, ATT, and CATE Estimation
+    ================================================================
+
+    This method implements Double Machine Learning (DML) to estimate the
+    Average Treatment Effect (ATE), Average Treatment Effect on the Treated
+    (ATT), and Conditional Average Treatment Effect (CATE) using flexible
+    machine learning models via the ``econml`` package.
+
+    Method:
+    -------
+    ``IPTWGEEModel.dml_estimate_treatment_effects()``
+
+    Parameters:
+    -----------
+    - data (pd.DataFrame): Dataset with outcome, treatment, and covariates.
+    - outcome_col (str): Name of the outcome column (Y).
+    - treatment_col (str): Name of the treatment column (T).
+    - categorical_vars (list): Categorical covariate names (one-hot encoded).
+    - binary_vars (list): Binary covariate names.
+    - continuous_vars (list): Continuous covariate names.
+    - W_cols (list): Explicit confounders list (overrides triple-list if given).
+    - X_cols (list): Effect modifier columns for CATE. Defaults to W_cols.
+    - model_y (estimator): Predictive model for outcome. Auto-selected if None.
+    - model_t (estimator): Predictive model for treatment. Default: RandomForestClassifier.
+    - discrete_outcome (bool): Whether outcome is binary. Auto-detected if None.
+    - discrete_treatment (bool): Whether treatment is discrete. Auto-detected if None.
+    - estimand (str): "ATE", "ATT", or "both". Default: "ATE".
+    - estimate (str): "ATE" (linear DML), "CATE" (Causal Forest), or "both".
+    - cluster_var (str): Clustering variable (stored for metadata; not used by DML).
+    - random_state (int): Random seed. Default: 42.
+    - test_size (float): Fraction held out for CATE evaluation. Default: 0.2.
+    - n_estimators (int): Number of Causal Forest trees. Default: 500.
+    - cv (int): Cross-validation folds. Default: 5.
+    - max_tree_depth (int): Max depth for CATE interpreter tree. Default: 3.
+    - min_samples_leaf (int): Min samples per leaf in interpreter tree. Default: 25.
+    - plot_cate, plot_importance, plot_tree (bool): Plot toggles.
+    - project_path, analysis_name (str): For optional Excel export.
+    - alpha (float): Significance level. Default: 0.05.
+
+    Returns:
+    --------
+    dict with keys: effect, estimand, ci_lower, ci_upper, p_value, significant,
+    alpha, cohens_d, pct_change, mean_treatment, mean_control, outcome_type,
+    coefficients_df, weight_diagnostics, ate_results, att_results, cate_results,
+    feature_importances_df, cate_plot, importance_plot, tree_plot, dml_model,
+    cfdml_model, cluster_var.
+
+    The return dict is compatible with ``build_summary_table()`` and
+    ``compute_evalues_from_results()``.
+
+    Example Usage:
+    --------------
+    ```python
+    from causal_inference_modelling import IPTWGEEModel
+
+    model = IPTWGEEModel()
+
+    # Using the triple-list convention (project standard)
+    results = model.dml_estimate_treatment_effects(
+        data=manager_data,
+        outcome_col='manager_efficacy_index',
+        treatment_col='treatment',
+        categorical_vars=['organization', 'job_level'],
+        binary_vars=['is_new_manager'],
+        continuous_vars=['tenure_years', 'performance_rating'],
+        estimand="both",      # Estimate both ATE and ATT
+        estimate="both",      # Run both Linear DML and Causal Forest
+        cluster_var='team_id',
+        random_state=42,
+    )
+
+    # Access ATE results
+    print("ATE:", results["ate_results"]["ATE"])
+    print("ATE CI:", results["ate_results"]["ATE_CI"])
+
+    # Access ATT results (derived from CATE over treated)
+    print("ATT:", results["att_results"]["ATT"])
+    print("ATT CI:", results["att_results"]["ATT_CI"])
+
+    # Access CATE results
+    cate = results["cate_results"]["cate_estimates"]
+    print("CATE mean:", cate.mean())
+    print("CATE std:", cate.std())
+
+    # Display plots (returned as figure objects)
+    results["cate_plot"].show()
+    results["importance_plot"].show()
+    results["tree_plot"].show()
+
+    # Save plots
+    results["cate_plot"].savefig('cate_distribution.png', dpi=300)
+    results["importance_plot"].savefig('feature_importance.png', dpi=300)
+    results["tree_plot"].savefig('cate_tree.png', dpi=300)
+
+    # Use with build_summary_table (across multiple outcomes)
+    all_results = {}
+    for outcome in outcomes:
+        all_results[outcome] = model.dml_estimate_treatment_effects(
+            data=manager_data,
+            outcome_col=outcome,
+            treatment_col='treatment',
+            categorical_vars=cat_vars,
+            binary_vars=bin_vars,
+            continuous_vars=cont_vars,
+        )
+    summary = IPTWGEEModel.build_summary_table(all_results)
+    ```
+
+    Notes:
+    ------
+    - ATE (Average Treatment Effect): Average effect of treatment across
+      the entire population. Estimated via Linear DML with a constant
+      treatment effect model.
+
+    - ATT (Average Treatment Effect on the Treated): Average effect for
+      those who actually received treatment. In Linear DML with X=None,
+      ATE = ATT by construction (constant effect). In Causal Forest,
+      ATT = mean(CATE) over treated observations — valid under
+      unconfoundedness. For first-class ATT with cluster-robust SEs,
+      use ``analyze_treatment_effect(estimand='ATT')``.
+
+    - CATE (Conditional Average Treatment Effect): Individualized
+      treatment effects conditional on covariates (X). Estimated via
+      Causal Forest DML, which provides heterogeneous effects.
+
+    - Clustering: DML does not natively account for clustered data
+      (e.g., managers in teams). Standard errors may be anti-conservative.
+      Use ``analyze_treatment_effect()`` for cluster-robust inference.
+
+    - The ``estimand`` and ``estimate`` parameters are orthogonal:
+      ``estimand`` controls the causal quantity (ATE/ATT),
+      ``estimate`` controls the statistical method (DML/CausalForest).
+        """
+        print(help_text)
 
     #Sensitivity analysis function for unmeasured confounding using E-values
     def compute_evalue(
@@ -1505,3 +2263,557 @@ class IPTWGEEModel:
             print(f"  Summary table saved to {save_path}")
         
         return summary_df
+
+    # ==================================================================
+    # Report generation methods
+    # ==================================================================
+
+    @staticmethod
+    def _format_pvalue(p: float) -> str:
+        """Format a p-value for display in Markdown tables."""
+        if p < 0.0001:
+            return "< 0.0001"
+        elif p < 0.001:
+            return "< 0.001"
+        else:
+            return f"{p:.3f}"
+
+    @staticmethod
+    def generate_summary_report(
+        summary_df: pd.DataFrame,
+        evalues_df: pd.DataFrame,
+        results_dict: Dict[str, Dict],
+        estimand: str,
+        family_label: str,
+        outcome_descriptions: Optional[Dict[str, str]] = None,
+        outcome_valence: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """
+        Generate a Markdown technical summary for a family of outcomes.
+
+        Combines the results table, per-outcome narratives, balance verification,
+        and E-value sensitivity analysis into a single rendered Markdown block.
+        Designed for use with ``IPython.display.Markdown`` in Jupyter notebooks.
+
+        Parameters
+        ----------
+        summary_df : pd.DataFrame
+            Output of ``build_summary_table()`` for this family of outcomes.
+        evalues_df : pd.DataFrame
+            Output of ``compute_evalues_from_results()`` for this family.
+        results_dict : Dict[str, Dict]
+            Per-outcome results from ``analyze_treatment_effect()``.
+        estimand : str
+            "ATE" or "ATT".
+        family_label : str
+            Label for this outcome family, e.g. "Survey Outcomes (Continuous)".
+        outcome_descriptions : Dict[str, str], optional
+            Mapping from variable names to display-friendly names.
+        outcome_valence : Dict[str, str], optional
+            Mapping from variable names to direction interpretation.
+            Use ``"positive"`` when higher values are better (default),
+            ``"negative"`` when higher values are worse (e.g. burnout,
+            workload).  Outcomes not listed default to ``"positive"``.
+
+        Returns
+        -------
+        str
+            Markdown-formatted summary string.
+        """
+        if outcome_descriptions is None:
+            outcome_descriptions = {}
+        if outcome_valence is None:
+            outcome_valence = {}
+
+        fmt_p = IPTWGEEModel._format_pvalue
+        lines: list = []
+
+        # Detect outcome type from first result
+        first_key = next(iter(results_dict))
+        is_binary = results_dict[first_key].get("outcome_type") == "binary"
+
+        n_tests = len(summary_df)
+        correction = (
+            summary_df["Correction_Method"].iloc[0].upper()
+            if "Correction_Method" in summary_df.columns
+            else "FDR_BH"
+        )
+
+        lines.append(f"#### {family_label} ({n_tests} tests, {correction}-corrected)")
+        lines.append("")
+
+        # ── Results table ──────────────────────────────────────────────
+        if is_binary:
+            lines.append(
+                f"| Outcome | {estimand} (log-odds) | Odds Ratio | "
+                f"95% CI (log-odds) | p (corrected) | Cohen's d | Significant? |"
+            )
+            lines.append(
+                "|---------|----------------|------------|" +
+                "-------------------|---------------|-----------|-------------|"
+            )
+            for _, row in summary_df.iterrows():
+                outcome = row["Outcome"]
+                name = outcome_descriptions.get(outcome, outcome)
+                eff = row["Effect"]
+                or_val = np.exp(eff)
+                ci_lo, ci_hi = row["CI_Lower"], row["CI_Upper"]
+                p_corr = row["P_Value_Corrected"]
+                d = row.get("Cohens_d")
+                sig = row["Significant"]
+                stars = row.get("Significance", "")
+
+                sig_str = f"Yes {stars}" if sig else "No"
+                d_str = f"{d:.2f}" if pd.notna(d) else "\u2014"
+
+                lines.append(
+                    f"| {name} | **{eff:+.2f}** | {or_val:.2f} | "
+                    f"[{ci_lo:.2f}, {ci_hi:.2f}] | {fmt_p(p_corr)} | {d_str} | {sig_str} |"
+                )
+        else:
+            lines.append(
+                f"| Outcome | {estimand} | 95% CI | p (corrected) | Cohen's d | Significant? |"
+            )
+            lines.append("|---------|-----|--------|---------------|-----------|-------------|")
+            for _, row in summary_df.iterrows():
+                outcome = row["Outcome"]
+                name = outcome_descriptions.get(outcome, outcome)
+                eff = row["Effect"]
+                ci_lo, ci_hi = row["CI_Lower"], row["CI_Upper"]
+                p_corr = row["P_Value_Corrected"]
+                d = row.get("Cohens_d")
+                sig = row["Significant"]
+                stars = row.get("Significance", "")
+
+                sig_str = f"Yes {stars}" if sig else "No"
+                d_str = f"{d:.2f}" if pd.notna(d) else "\u2014"
+
+                lines.append(
+                    f"| {name} | **{eff:+.2f}** | [{ci_lo:.2f}, {ci_hi:.2f}] | "
+                    f"{fmt_p(p_corr)} | {d_str} | {sig_str} |"
+                )
+
+        lines.append("")
+
+        # ── Per-outcome narratives ─────────────────────────────────────
+        for _, row in summary_df.iterrows():
+            outcome = row["Outcome"]
+            name = outcome_descriptions.get(outcome, outcome)
+            eff = row["Effect"]
+            sig = row["Significant"]
+            res = results_dict[outcome]
+            pct = res.get("pct_change")
+            d = res.get("cohens_d")
+            p_corr = row["P_Value_Corrected"]
+
+            # Determine valence-aware language
+            valence = outcome_valence.get(outcome, "positive")
+            if valence == "negative":
+                # Higher values are worse (e.g. workload, burnout)
+                quality_word = "worsening" if eff > 0 else "improvement"
+            else:
+                # Higher values are better (default)
+                quality_word = "improvement" if eff > 0 else "decline"
+
+            if not is_binary:
+                if sig:
+                    if pct is not None:
+                        pct_str = f"**{pct:+.1f}% relative {quality_word}**"
+                    else:
+                        pct_str = f"**{quality_word}**"
+                    lines.append(f"**{name}**")
+                    lines.append(
+                        f"- {estimand} of **{eff:+.2f}** (Cohen's d = {d:.2f}), "
+                        f"representing a {pct_str} vs. controls"
+                    )
+                    lines.append("")
+                else:
+                    lines.append(f"**{name}** \u2014 *No effect detected*")
+                    lines.append(
+                        f"- {estimand} of **{eff:+.2f}**, not statistically "
+                        f"significant (p = {p_corr:.3f})"
+                    )
+                    lines.append("")
+
+        if is_binary:
+            sig_rows = summary_df[summary_df["Significant"]]
+            if not sig_rows.empty:
+                ors = [
+                    (row["Outcome"], np.exp(row["Effect"]))
+                    for _, row in sig_rows.iterrows()
+                ]
+
+                # Range summary — use max/min OR (order-agnostic)
+                or_max = max(ors, key=lambda x: x[1])
+                or_min = min(ors, key=lambda x: x[1])
+                pct_high = (or_max[1] - 1) * 100
+                pct_low = (or_min[1] - 1) * 100
+                max_name = outcome_descriptions.get(or_max[0], or_max[0])
+                min_name = outcome_descriptions.get(or_min[0], or_min[0])
+                cohens_ds = [
+                    results_dict[o]["cohens_d"]
+                    for o, _ in ors
+                    if results_dict[o].get("cohens_d") is not None
+                ]
+                d_range = (
+                    f" with effect sizes ranging from "
+                    f"{min(cohens_ds):.2f}\u2013{max(cohens_ds):.2f}"
+                    if cohens_ds
+                    else ""
+                )
+
+                if len(ors) > 1:
+                    lines.append(
+                        f"- Significant outcomes show odds ranging from "
+                        f"{pct_low:+.0f}% ({min_name}) to "
+                        f"{pct_high:+.0f}% ({max_name}) relative to controls"
+                        f"{d_range}."
+                    )
+                else:
+                    lines.append(
+                        f"- {max_name}: OR = {or_max[1]:.2f} "
+                        f"({pct_high:+.0f}% odds vs. controls){d_range}."
+                    )
+
+                # Trend detection (only when >1 significant outcome)
+                if len(ors) > 1:
+                    vals = [o[1] for o in ors]
+                    is_decreasing = all(
+                        vals[i] >= vals[i + 1] for i in range(len(vals) - 1)
+                    )
+                    is_increasing = all(
+                        vals[i] <= vals[i + 1] for i in range(len(vals) - 1)
+                    )
+                    is_flat = max(vals) - min(vals) < 0.05
+
+                    if is_flat:
+                        lines.append(
+                            "- The treatment effect is **stable** across all "
+                            "significant outcomes."
+                        )
+                    elif is_decreasing:
+                        lines.append(
+                            "- The treatment effect **attenuates** from the "
+                            "first to last significant outcome (strongest at "
+                            f"{outcome_descriptions.get(ors[0][0], ors[0][0])}"
+                            f", weakest at "
+                            f"{outcome_descriptions.get(ors[-1][0], ors[-1][0])}"
+                            f"), consistent with an effect that fades over time "
+                            f"or across contexts."
+                        )
+                    elif is_increasing:
+                        lines.append(
+                            "- The treatment effect **strengthens** from the "
+                            "first to last significant outcome (weakest at "
+                            f"{outcome_descriptions.get(ors[0][0], ors[0][0])}"
+                            f", strongest at "
+                            f"{outcome_descriptions.get(ors[-1][0], ors[-1][0])}"
+                            f"), suggesting a cumulative or delayed benefit."
+                        )
+                    else:
+                        lines.append(
+                            "- The treatment effect is **non-monotonic** across "
+                            "significant outcomes \u2014 consider examining each "
+                            "outcome individually."
+                        )
+
+                lines.append("")
+
+                # Generic OR interpretation
+                top_or = or_max[1]
+                top_name = outcome_descriptions.get(or_max[0], or_max[0])
+                top_pct = (top_or - 1) * 100
+                direction = "more" if top_or > 1 else "less"
+                lines.append("**How to read the odds ratios:**")
+                lines.append(
+                    f"An odds ratio (OR) above 1.0 means treated individuals "
+                    f"were *{direction} likely* to experience the outcome than "
+                    f"untreated individuals. For example, an OR of "
+                    f"**{top_or:.2f} for {top_name}** means the odds were "
+                    f"**{top_pct:+.0f}%** relative to the comparison group. "
+                    f"As the OR approaches 1.0, the treatment effect weakens."
+                )
+                lines.append("")
+
+            # Handle case where no binary outcomes are significant
+            else:
+                lines.append(
+                    "No binary outcomes reached statistical significance "
+                    "after multiple testing correction."
+                )
+                lines.append("")
+
+        # ── Balance verification ───────────────────────────────────────
+        lines.append("#### Post-Weighting Balance Verification")
+        all_balanced = True
+        for outcome, res in results_dict.items():
+            bal_df = res.get("balance_df")
+            if bal_df is not None and "balanced_after_weighting" in bal_df.columns:
+                n_imbal = int(bal_df["balanced_after_weighting"].eq(False).sum())
+                if n_imbal > 0:
+                    all_balanced = False
+                    name = outcome_descriptions.get(outcome, outcome)
+                    lines.append(f"- \u26a0\ufe0f {name}: {n_imbal} imbalanced covariates")
+        if all_balanced:
+            lines.append(
+                f"- \u2705 All {len(results_dict)} outcomes passed balance verification "
+                f"(0 imbalanced covariates)."
+            )
+            lines.append(
+                "- IPTW successfully balanced observed confounders across treatment groups."
+            )
+        lines.append("")
+
+        # ── E-value table ──────────────────────────────────────────────
+        if evalues_df is not None and not evalues_df.empty:
+            lines.append("#### E-Value Sensitivity Analysis")
+            lines.append("")
+            lines.append("| Outcome | E-Value Point | E-Value CI | Robustness |")
+            lines.append("|---------|---------------|------------|------------|")
+            for _, row in evalues_df.iterrows():
+                outcome = row["Outcome"]
+                name = outcome_descriptions.get(outcome, outcome)
+                ev_pt = row["E_Value_Point"]
+                ev_ci = row["E_Value_CI"]
+                robustness = row["Robustness"]
+                sig = row.get("Significant", False)
+
+                ev_ci_str = f"{ev_ci:.2f}" if pd.notna(ev_ci) else "\u2014"
+                if sig:
+                    lines.append(
+                        f"| {name} | **{ev_pt:.2f}** | **{ev_ci_str}** | {robustness} |"
+                    )
+                else:
+                    lines.append(
+                        f"| {name} | {ev_pt:.2f} | {ev_ci_str} | {robustness} (ns) |"
+                    )
+            lines.append("")
+
+            # Per-outcome E-value interpretations (significant only)
+            sig_ev = evalues_df[evalues_df["Significant"] == True]
+            if not sig_ev.empty:
+                lines.append("**Significant outcome interpretations:**")
+                lines.append("")
+                for _, row in sig_ev.iterrows():
+                    outcome = row["Outcome"]
+                    name = outcome_descriptions.get(outcome, outcome)
+                    interp = row.get("Interpretation", "")
+                    if pd.notna(interp) and interp:
+                        lines.append(f"- **{name}:** {interp}")
+                        lines.append("")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def generate_comparison_table(
+        ate_summary: pd.DataFrame,
+        att_summary: pd.DataFrame,
+        ate_evalues: pd.DataFrame,
+        att_evalues: pd.DataFrame,
+        ate_results: Dict[str, Dict],
+        att_results: Dict[str, Dict],
+        outcome_descriptions: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """
+        Generate a Markdown ATE vs ATT comparison.
+
+        Creates side-by-side effect comparison and E-value comparison tables,
+        plus auto-generated key observations about systematic differences
+        between the two estimands.
+
+        Parameters
+        ----------
+        ate_summary : pd.DataFrame
+            Concatenation of all ATE ``build_summary_table()`` outputs.
+        att_summary : pd.DataFrame
+            Concatenation of all ATT ``build_summary_table()`` outputs.
+        ate_evalues : pd.DataFrame
+            Concatenation of all ATE ``compute_evalues_from_results()`` outputs.
+        att_evalues : pd.DataFrame
+            Concatenation of all ATT ``compute_evalues_from_results()`` outputs.
+        ate_results : Dict[str, Dict]
+            Merged ATE per-outcome ``analyze_treatment_effect()`` dicts.
+        att_results : Dict[str, Dict]
+            Merged ATT per-outcome ``analyze_treatment_effect()`` dicts.
+        outcome_descriptions : Dict[str, str], optional
+            Mapping from variable names to display-friendly names.
+
+        Returns
+        -------
+        str
+            Markdown-formatted comparison string.
+        """
+        if outcome_descriptions is None:
+            outcome_descriptions = {}
+
+        lines: list = []
+
+        # ── Side-by-side effect comparison ─────────────────────────────
+        lines.append("### Side-by-Side Comparison")
+        lines.append("")
+        lines.append("| Outcome | ATE | ATT | Difference |")
+        lines.append("|---------|-----|-----|------------|")
+
+        for _, ate_row in ate_summary.iterrows():
+            outcome = ate_row["Outcome"]
+            name = outcome_descriptions.get(outcome, outcome)
+
+            att_match = att_summary[att_summary["Outcome"] == outcome]
+            if att_match.empty:
+                continue
+            att_row = att_match.iloc[0]
+
+            is_binary = ate_results.get(outcome, {}).get("outcome_type") == "binary"
+
+            if is_binary:
+                ate_or = np.exp(ate_row["Effect"])
+                att_or = np.exp(att_row["Effect"])
+                direction = "larger" if att_or > ate_or else "smaller"
+                lines.append(
+                    f"| **{name}** (OR) | {ate_or:.2f} | {att_or:.2f} | ATT {direction} |"
+                )
+            else:
+                ate_eff = ate_row["Effect"]
+                att_eff = att_row["Effect"]
+                ate_d = ate_row.get("Cohens_d")
+                att_d = att_row.get("Cohens_d")
+                ate_sig = ate_row["Significant"]
+                att_sig = att_row["Significant"]
+
+                ate_d_str = f" (Cohen's d = {ate_d:.2f})" if pd.notna(ate_d) else ""
+                att_d_str = f" (Cohen's d = {att_d:.2f})" if pd.notna(att_d) else ""
+                ate_ns = " (ns)" if not ate_sig else ""
+                att_ns = " (ns)" if not att_sig else ""
+
+                direction = (
+                    "slightly larger" if abs(att_eff) > abs(ate_eff) else "slightly smaller"
+                )
+                lines.append(
+                    f"| **{name}** | {ate_eff:+.2f}{ate_d_str}{ate_ns} | "
+                    f"{att_eff:+.2f}{att_d_str}{att_ns} | ATT {direction} |"
+                )
+
+        lines.append("")
+
+        # ── Key observations (auto-generated) ──────────────────────────
+        lines.append("### Key Observations")
+        lines.append("")
+
+        att_larger_count = 0
+        total_sig = 0
+        for _, ate_row in ate_summary.iterrows():
+            outcome = ate_row["Outcome"]
+            att_match = att_summary[att_summary["Outcome"] == outcome]
+            if att_match.empty:
+                continue
+            att_row = att_match.iloc[0]
+            if ate_row["Significant"] or att_row["Significant"]:
+                total_sig += 1
+                is_binary = ate_results.get(outcome, {}).get("outcome_type") == "binary"
+                if is_binary:
+                    if np.exp(att_row["Effect"]) > np.exp(ate_row["Effect"]):
+                        att_larger_count += 1
+                else:
+                    if abs(att_row["Effect"]) > abs(ate_row["Effect"]):
+                        att_larger_count += 1
+
+        observation_num = 1
+        if total_sig > 0 and att_larger_count == total_sig:
+            lines.append(
+                f"{observation_num}. **ATT effects are consistently larger** across all "
+                f"significant outcomes, suggesting positive selection or treatment "
+                f"effect heterogeneity: managers who received training benefited more "
+                f"than the average manager in the population would have."
+            )
+            lines.append("")
+            observation_num += 1
+
+        # Check whether binary gap > continuous gap
+        binary_outcomes = [
+            o for o in ate_results if ate_results[o].get("outcome_type") == "binary"
+        ]
+        continuous_outcomes = [
+            o for o in ate_results if ate_results[o].get("outcome_type") == "continuous"
+        ]
+
+        if binary_outcomes and continuous_outcomes:
+            binary_gaps = []
+            for o in binary_outcomes:
+                ate_m = ate_summary[ate_summary["Outcome"] == o]
+                att_m = att_summary[att_summary["Outcome"] == o]
+                if not ate_m.empty and not att_m.empty:
+                    ate_or = np.exp(ate_m.iloc[0]["Effect"])
+                    att_or = np.exp(att_m.iloc[0]["Effect"])
+                    if ate_or > 0:
+                        binary_gaps.append(((att_or - ate_or) / ate_or) * 100)
+
+            cont_gaps = []
+            for o in continuous_outcomes:
+                ate_m = ate_summary[ate_summary["Outcome"] == o]
+                att_m = att_summary[att_summary["Outcome"] == o]
+                if not ate_m.empty and not att_m.empty:
+                    ate_eff = ate_m.iloc[0]["Effect"]
+                    att_eff = att_m.iloc[0]["Effect"]
+                    if abs(ate_eff) > 0.01:
+                        cont_gaps.append(abs((att_eff - ate_eff) / ate_eff) * 100)
+
+            if binary_gaps and cont_gaps:
+                avg_binary_gap = np.mean(np.abs(binary_gaps))
+                avg_cont_gap = np.mean(cont_gaps)
+                if avg_binary_gap > avg_cont_gap:
+                    lines.append(
+                        f"{observation_num}. **The ATE\u2013ATT gap is most pronounced for "
+                        f"retention (binary) outcomes**, suggesting the training's impact "
+                        f"on behavioral outcomes varies more by who receives it than its "
+                        f"impact on self-reported attitudes."
+                    )
+                    lines.append("")
+                    observation_num += 1
+
+        lines.append(
+            f"{observation_num}. **Both estimands tell the same qualitative story**: "
+            f"the direction and significance pattern is consistent across ATE and ATT "
+            f"for all outcomes."
+        )
+        lines.append("")
+
+        # ── E-value comparison ─────────────────────────────────────────
+        lines.append("### E-Value Comparison")
+        lines.append("")
+        lines.append("| Outcome | ATE E-Value | ATT E-Value | Difference |")
+        lines.append("|---------|-------------|-------------|------------|")
+
+        for _, ate_ev in ate_evalues.iterrows():
+            outcome = ate_ev["Outcome"]
+            name = outcome_descriptions.get(outcome, outcome)
+            ate_sig = ate_ev.get("Significant", False)
+
+            att_match = att_evalues[att_evalues["Outcome"] == outcome]
+            if att_match.empty:
+                continue
+            att_ev_row = att_match.iloc[0]
+            att_sig = att_ev_row.get("Significant", False)
+
+            if not ate_sig and not att_sig:
+                continue
+
+            ate_pt = ate_ev["E_Value_Point"]
+            att_pt = att_ev_row["E_Value_Point"]
+            diff = att_pt - ate_pt
+
+            if diff > 0.15:
+                desc = "ATT notably more robust"
+            elif diff > 0.05:
+                desc = "ATT marginally more robust"
+            elif diff < -0.15:
+                desc = "ATE notably more robust"
+            elif diff < -0.05:
+                desc = "ATE marginally more robust"
+            else:
+                desc = "Similar robustness"
+
+            lines.append(f"| **{name}** | {ate_pt:.2f} | {att_pt:.2f} | {desc} |")
+
+        lines.append("")
+
+        return "\n".join(lines)

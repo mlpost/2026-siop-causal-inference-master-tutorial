@@ -10,7 +10,7 @@ Usage:
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import statsmodels.api as sm
+from statsmodels.tools.tools import add_constant
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from itertools import combinations
 from scipy.stats import chi2_contingency
@@ -322,7 +322,7 @@ class CausalDiagnostics:
 
         # --- Encode and prepare matrix ---
         vif_encoded = pd.get_dummies(vif_predictors, drop_first=True)
-        vif_encoded = sm.add_constant(vif_encoded)
+        vif_encoded = add_constant(vif_encoded)
         vif_encoded = vif_encoded.astype(float)
         X = vif_encoded.values
         col_names = vif_encoded.columns.tolist()
