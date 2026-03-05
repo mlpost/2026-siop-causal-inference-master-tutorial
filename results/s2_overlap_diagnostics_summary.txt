@@ -21,7 +21,7 @@ UNIVARIATE BALANCE (SMD):
 --------------------------------------------------------------------------------
   Total variables:          11
   Severe imbalance (>0.5):  0 (0.0%)
-  Mean |SMD|:               0.112
+  Mean |SMD|:               0.108
   Max |SMD|:                0.401
 
 MULTIVARIATE OVERLAP (Propensity Score):
@@ -29,11 +29,11 @@ MULTIVARIATE OVERLAP (Propensity Score):
   Separability AUC:         0.650
     → Good: Reasonable multivariate overlap
 
-  Common support width:     0.106
-  Treated in overlap:       90.3%
-  Controls in overlap:      91.1%
+  Common support width:     0.108
+  Treated in overlap:       89.7%
+  Controls in overlap:      91.5%
 
-  ⚠️  47 treated units outside common support!
+  ⚠️  50 treated units outside common support!
      These require EXTRAPOLATION for causal inference.
 
 ASSESSMENT:
@@ -60,19 +60,19 @@ UNIVARIATE BALANCE (SMD):
 --------------------------------------------------------------------------------
   Total variables:          11
   Severe imbalance (>0.5):  0 (0.0%)
-  Mean |SMD|:               0.105
+  Mean |SMD|:               0.101
   Max |SMD|:                0.401
 
 MULTIVARIATE OVERLAP (Propensity Score):
 --------------------------------------------------------------------------------
-  Separability AUC:         0.643
+  Separability AUC:         0.648
     → Good: Reasonable multivariate overlap
 
   Common support width:     0.107
-  Treated in overlap:       89.9%
-  Controls in overlap:      90.9%
+  Treated in overlap:       88.9%
+  Controls in overlap:      91.9%
 
-  ⚠️  49 treated units outside common support!
+  ⚠️  54 treated units outside common support!
      These require EXTRAPOLATION for causal inference.
 
 ASSESSMENT:
@@ -99,175 +99,19 @@ UNIVARIATE BALANCE (SMD):
 --------------------------------------------------------------------------------
   Total variables:          11
   Severe imbalance (>0.5):  0 (0.0%)
-  Mean |SMD|:               0.109
+  Mean |SMD|:               0.104
   Max |SMD|:                0.401
 
 MULTIVARIATE OVERLAP (Propensity Score):
 --------------------------------------------------------------------------------
-  Separability AUC:         0.648
+  Separability AUC:         0.645
     → Good: Reasonable multivariate overlap
 
-  Common support width:     0.106
-  Treated in overlap:       89.7%
-  Controls in overlap:      90.9%
+  Common support width:     0.108
+  Treated in overlap:       89.9%
+  Controls in overlap:      91.4%
 
-  ⚠️  50 treated units outside common support!
-     These require EXTRAPOLATION for causal inference.
-
-ASSESSMENT:
---------------------------------------------------------------------------------
-  Recommendation: PROCEED
-  Confidence:     HIGH
-
-ESTIMAND GUIDANCE:
---------------------------------------------------------------------------------
-  ✓ Both ATT and ATE may be feasible
-    Choice depends on research question
-
-================================================================================
-OUTCOME: retention_3month
-================================================================================
-
-SAMPLE COMPOSITION:
---------------------------------------------------------------------------------
-  Treated:      487
-  Control:     6733
-  Treatment rate: 6.75%
-
-UNIVARIATE BALANCE (SMD):
---------------------------------------------------------------------------------
-  Total variables:          10
-  Severe imbalance (>0.5):  0 (0.0%)
-  Mean |SMD|:               0.115
-  Max |SMD|:                0.401
-
-MULTIVARIATE OVERLAP (Propensity Score):
---------------------------------------------------------------------------------
-  Separability AUC:         0.641
-    → Good: Reasonable multivariate overlap
-
-  Common support width:     0.096
-  Treated in overlap:       88.7%
-  Controls in overlap:      90.6%
-
-  ⚠️  55 treated units outside common support!
-     These require EXTRAPOLATION for causal inference.
-
-ASSESSMENT:
---------------------------------------------------------------------------------
-  Recommendation: PROCEED
-  Confidence:     HIGH
-
-ESTIMAND GUIDANCE:
---------------------------------------------------------------------------------
-  ✓ Both ATT and ATE may be feasible
-    Choice depends on research question
-
-================================================================================
-OUTCOME: retention_6month
-================================================================================
-
-SAMPLE COMPOSITION:
---------------------------------------------------------------------------------
-  Treated:      487
-  Control:     6733
-  Treatment rate: 6.75%
-
-UNIVARIATE BALANCE (SMD):
---------------------------------------------------------------------------------
-  Total variables:          10
-  Severe imbalance (>0.5):  0 (0.0%)
-  Mean |SMD|:               0.115
-  Max |SMD|:                0.401
-
-MULTIVARIATE OVERLAP (Propensity Score):
---------------------------------------------------------------------------------
-  Separability AUC:         0.641
-    → Good: Reasonable multivariate overlap
-
-  Common support width:     0.096
-  Treated in overlap:       88.7%
-  Controls in overlap:      90.6%
-
-  ⚠️  55 treated units outside common support!
-     These require EXTRAPOLATION for causal inference.
-
-ASSESSMENT:
---------------------------------------------------------------------------------
-  Recommendation: PROCEED
-  Confidence:     HIGH
-
-ESTIMAND GUIDANCE:
---------------------------------------------------------------------------------
-  ✓ Both ATT and ATE may be feasible
-    Choice depends on research question
-
-================================================================================
-OUTCOME: retention_9month
-================================================================================
-
-SAMPLE COMPOSITION:
---------------------------------------------------------------------------------
-  Treated:      487
-  Control:     6733
-  Treatment rate: 6.75%
-
-UNIVARIATE BALANCE (SMD):
---------------------------------------------------------------------------------
-  Total variables:          10
-  Severe imbalance (>0.5):  0 (0.0%)
-  Mean |SMD|:               0.115
-  Max |SMD|:                0.401
-
-MULTIVARIATE OVERLAP (Propensity Score):
---------------------------------------------------------------------------------
-  Separability AUC:         0.641
-    → Good: Reasonable multivariate overlap
-
-  Common support width:     0.096
-  Treated in overlap:       88.7%
-  Controls in overlap:      90.6%
-
-  ⚠️  55 treated units outside common support!
-     These require EXTRAPOLATION for causal inference.
-
-ASSESSMENT:
---------------------------------------------------------------------------------
-  Recommendation: PROCEED
-  Confidence:     HIGH
-
-ESTIMAND GUIDANCE:
---------------------------------------------------------------------------------
-  ✓ Both ATT and ATE may be feasible
-    Choice depends on research question
-
-================================================================================
-OUTCOME: retention_12month
-================================================================================
-
-SAMPLE COMPOSITION:
---------------------------------------------------------------------------------
-  Treated:      487
-  Control:     6733
-  Treatment rate: 6.75%
-
-UNIVARIATE BALANCE (SMD):
---------------------------------------------------------------------------------
-  Total variables:          10
-  Severe imbalance (>0.5):  0 (0.0%)
-  Mean |SMD|:               0.115
-  Max |SMD|:                0.401
-
-MULTIVARIATE OVERLAP (Propensity Score):
---------------------------------------------------------------------------------
-  Separability AUC:         0.641
-    → Good: Reasonable multivariate overlap
-
-  Common support width:     0.096
-  Treated in overlap:       88.7%
-  Controls in overlap:      90.6%
-
-  ⚠️  55 treated units outside common support!
+  ⚠️  49 treated units outside common support!
      These require EXTRAPOLATION for causal inference.
 
 ASSESSMENT:

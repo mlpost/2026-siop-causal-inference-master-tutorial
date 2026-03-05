@@ -11,6 +11,8 @@ Classes:
 import re
 import warnings
 
+from lifelines import KaplanMeierFitter, CoxPHFitter
+from lifelines.statistics import logrank_test
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -27,40 +29,52 @@ from econml.cate_interpreter import SingleTreeCateInterpreter
 from causal_diagnostics import CausalDiagnostics
 
 
-class IPTWGEEModel:
+class CausalInferenceModel:
     """
-    Inverse Probability of Treatment Weighting (IPTW) with GEE for causal inference,
-    with optional Double Machine Learning (DML) for heterogeneous treatment effects.
-    
-    This class implements two complementary approaches:
-    
+    Unified causal inference toolkit for treatment effect estimation.
+
+    This class implements three complementary approaches:
+
     **Approach 1 — IPTW + Doubly Robust GEE** (``analyze_treatment_effect``):
+    - For continuous and binary outcomes (e.g., survey indices, binary flags)
     - Stabilized inverse probability weights (IPTW) for ATE or ATT
     - Generalized Estimating Equations (GEE) to account for clustering
     - Optional outcome model covariate adjustment for doubly robust property
-    
-    **Approach 2 — Double Machine Learning** (``dml_estimate_treatment_effects``):
+
+    **Approach 2 — IPTW + Cox Proportional Hazards** (``analyze_survival_effect``):
+    - For time-to-event outcomes (e.g., employee retention, time to departure)
+    - Same IPTW weighting infrastructure as Approach 1
+    - Cox PH model for hazard ratios with IPTW-weighted Kaplan-Meier curves
+    - Restricted Mean Survival Time (RMST) for business-friendly interpretation
+    - Use ``prepare_survival_data()`` to convert departure dates to survival format
+
+    **Approach 3 — Double Machine Learning** (``dml_estimate_treatment_effects``):
     - Linear DML for ATE/ATT estimation with flexible ML nuisance models
     - Causal Forest DML for individualized CATE estimation
     - ATT derived from CATE by averaging over treated observations
     - Uses the ``econml`` package
-    
+
     The estimand (ATE vs. ATT) is determined by the weight construction formula
-    (IPTW) or by subsetting CATE predictions (DML), not by GEE itself.
-    
+    (IPTW) or by subsetting CATE predictions (DML), not by GEE or Cox itself.
+
     Note on standard errors:
-        GEE sandwich standard errors account for within-cluster correlation but
-        do **not** propagate the first-stage uncertainty from propensity score
-        estimation. This can yield slightly anti-conservative confidence
-        intervals. For stricter inference, consider a non-parametric bootstrap
-        that re-estimates both stages in each replicate.
-    
-    Attributes:
-        weight_col (str): Name of the weight column (default: "iptw")
-        ps_model: Last fitted propensity score model (use per-outcome dicts for multi-outcome runs)
-        gee_model: Last fitted GEE outcome model (use per-outcome dicts for multi-outcome runs)
-        dml_model: Last fitted DML model (if DML methods used)
-        cfdml_model: Last fitted CausalForestDML model (if DML methods used)
+        GEE and Cox sandwich standard errors account for within-cluster
+        correlation but do **not** propagate first-stage uncertainty from
+        propensity score estimation. For stricter inference, consider a
+        non-parametric bootstrap that re-estimates both stages in each replicate.
+
+    Attributes
+    ----------
+    weight_col : str
+        Name of the weight column (default: \"iptw\")
+    ps_model : object
+        Last fitted propensity score model
+    gee_model : object
+        Last fitted GEE outcome model
+    dml_model : object
+        Last fitted DML model (if DML methods used)
+    cfdml_model : object
+        Last fitted CausalForestDML model (if DML methods used)
     """
     
     def __init__(self):
@@ -76,6 +90,273 @@ class IPTWGEEModel:
         self.gee_model = None
         self.dml_model = None
         self.cfdml_model = None
+
+    # ==================================================================
+    # Data preparation
+    # ==================================================================
+
+    def prepare_survival_data(self, data, departure_date_col,
+                              treatment_var,
+                              t0_date,
+                              study_end_date,
+                              date_format='%m-%d-%Y',
+                              time_col_name='days_observed',
+                              event_col_name='departed',
+                              _quiet=False):
+        """
+        Convert departure date data to survival analysis format (time-to-event).
+
+        Designed for scenarios where:
+        - T=0 is the same calendar date for all managers (e.g., January 1)
+        - Exact departure dates are known for those who left
+        - Still-employed managers are censored at a common study end date
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Dataset containing one row per manager.
+        departure_date_col : str
+            Column name containing departure date in m-dd-yyyy format.
+            NaN/NaT values indicate still employed (censored).
+        treatment_var : str
+            Binary treatment column name (1=trained, 0=untrained).
+        t0_date : str
+            Study start date (T=0) for ALL managers, e.g., '1-01-2025'.
+            Format must match date_format parameter.
+        study_end_date : str
+            Censoring date for still-employed managers, e.g., '12-31-2025'.
+            Format must match date_format parameter.
+        date_format : str, default '%m-%d-%Y'
+            Date parsing format string.
+        time_col_name : str, default 'days_observed'
+            Name for output time column (days from T=0 to event or censoring).
+        event_col_name : str, default 'departed'
+            Name for output event indicator column (1=departed, 0=censored).
+        _quiet : bool, default False
+            If True, suppress print output.
+
+        Returns
+        -------
+        pd.DataFrame
+            Copy of input data with added columns:
+            - time_col_name (int): days from T=0 to event/censoring
+            - event_col_name (int): 1 if departed, 0 if censored
+            - 'departure_quarter' (str): quarter of departure for diagnostics
+
+        Raises
+        ------
+        ValueError
+            If departure_date_col or treatment_var not in data.columns.
+        """
+
+        def _print(msg=""):
+            """Internal print wrapper respecting _quiet flag."""
+            if not _quiet:
+                print(msg)
+
+        # ==================================================================
+        # STEP 1 — Parse all dates
+        # ==================================================================
+
+        if departure_date_col not in data.columns:
+            raise ValueError(f"departure_date_col '{departure_date_col}' not found in data.")
+        if treatment_var not in data.columns:
+            raise ValueError(f"treatment_var '{treatment_var}' not found in data.")
+
+        # Parse scalar dates
+        t0 = pd.to_datetime(t0_date, format=date_format)
+        study_end = pd.to_datetime(study_end_date, format=date_format)
+
+        # Parse departure date column (errors='coerce' converts invalid dates to NaT)
+        parsed_departure = pd.to_datetime(data[departure_date_col],
+                                          format=date_format,
+                                          errors='coerce')
+
+        # Total study window in days
+        total_days = (study_end - t0).days
+
+        _print(f"\nParsed dates:")
+        _print(f"  T=0 (study start):  {t0.date()}")
+        _print(f"  Study end:          {study_end.date()}")
+        _print(f"  Total window:       {total_days} days")
+
+        # Date range of observed departures
+        valid_departures = parsed_departure.dropna()
+        if len(valid_departures) > 0:
+            _print(f"  Departure range:    {valid_departures.min().date()} → "
+                   f"{valid_departures.max().date()}")
+        else:
+            _print(f"  Departure range:    (no departures observed)")
+
+        # ==================================================================
+        # STEP 2 — Data quality checks
+        # ==================================================================
+
+        # Check A: Departure before T=0
+        before_t0 = parsed_departure < t0
+        n_before_t0 = before_t0.sum()
+        if n_before_t0 > 0:
+            _print(f"\n⚠️  WARNING: {n_before_t0} managers have departure date "
+                   f"BEFORE study start (T=0).")
+            _print(f"   Check data quality for these records:")
+            bad_indices = data.index[before_t0].tolist()
+            _print(f"   Indices: {bad_indices[:10]}" +
+                    (f" ... and {len(bad_indices)-10} more" if len(bad_indices) > 10 else ""))
+
+        # Check B: Departure after study end
+        after_end = parsed_departure > study_end
+        n_after_end = after_end.sum()
+        if n_after_end > 0:
+            _print(f"\n⚠️  WARNING: {n_after_end} managers have departure date "
+                   f"AFTER study end.")
+            _print(f"   These will be treated as censored at study end.")
+            # Correct these by setting to NaT (censored)
+            parsed_departure = parsed_departure.copy()
+            parsed_departure.loc[after_end] = pd.NaT
+
+        # ==================================================================
+        # STEP 3 — Compute event indicator and time observed
+        # ==================================================================
+
+        # Create a copy of data to avoid mutating original
+        result_df = data.copy()
+
+        # Event indicator: 1 if departure date is not NaT, 0 otherwise
+        result_df[event_col_name] = parsed_departure.notna().astype(int)
+
+        # Days observed:
+        # - If event=1: days from T=0 to departure
+        # - If event=0: days from T=0 to study end (censored)
+        result_df[time_col_name] = np.where(
+            parsed_departure.notna(),
+            (parsed_departure - t0).dt.days,  # exact days to departure
+            total_days                         # censored at study end
+        )
+
+        # Check C: Zero or negative survival times
+        bad_times = result_df[time_col_name] <= 0
+        n_bad_times = bad_times.sum()
+        if n_bad_times > 0:
+            _print(f"\n⚠️  WARNING: {n_bad_times} managers have {time_col_name} <= 0.")
+            _print(f"   Review these records for data quality issues.")
+
+        # Check D: Departure on day 0 exactly
+        day_zero = (result_df[event_col_name] == 1) & (result_df[time_col_name] == 0)
+        n_day_zero = day_zero.sum()
+        if n_day_zero > 0:
+            _print(f"\n⚠️  WARNING: {n_day_zero} managers have departure on day 0 "
+                   f"(same as T=0).")
+            _print(f"   Verify whether these are data entry errors.")
+
+        # ==================================================================
+        # STEP 4 — Add departure_quarter column for diagnostics
+        # ==================================================================
+
+        def assign_quarter(row):
+            """Assign departure quarter based on days_observed."""
+            if row[event_col_name] == 0:
+                return 'Censored'
+            days = row[time_col_name]
+            if days <= 90:
+                return 'Q1 (Jan-Mar)'
+            elif days <= 180:
+                return 'Q2 (Apr-Jun)'
+            elif days <= 270:
+                return 'Q3 (Jul-Sep)'
+            else:
+                return 'Q4 (Oct-Dec)'
+
+        result_df['departure_quarter'] = result_df.apply(assign_quarter, axis=1)
+
+        # ==================================================================
+        # STEP 5 — Print comprehensive summary
+        # ==================================================================
+
+        T = result_df[treatment_var].values
+        n_total = len(result_df)
+        n_treated = (T == 1).sum()
+        n_control = (T == 0).sum()
+        pct_treated = (n_treated / n_total * 100) if n_total > 0 else 0
+        pct_control = (n_control / n_total * 100) if n_total > 0 else 0
+
+        n_events = result_df[event_col_name].sum()
+        n_events_treated = ((T == 1) & (result_df[event_col_name] == 1)).sum()
+        n_events_control = ((T == 0) & (result_df[event_col_name] == 1)).sum()
+
+        event_rate = (n_events / n_total * 100) if n_total > 0 else 0
+        event_rate_treated = (n_events_treated / n_treated * 100) if n_treated > 0 else 0
+        event_rate_control = (n_events_control / n_control * 100) if n_control > 0 else 0
+
+        n_censored = (result_df[event_col_name] == 0).sum()
+        n_censored_treated = ((T == 1) & (result_df[event_col_name] == 0)).sum()
+        n_censored_control = ((T == 0) & (result_df[event_col_name] == 0)).sum()
+        censored_rate = (n_censored / n_total * 100) if n_total > 0 else 0
+
+        median_days = result_df[time_col_name].median()
+        events_only = result_df[result_df[event_col_name] == 1]
+        median_event_days = events_only[time_col_name].median() if len(events_only) > 0 else np.nan
+
+        _print("\n" + "=" * 60)
+        _print("SURVIVAL DATA PREPARATION SUMMARY")
+        _print("=" * 60)
+        _print(f"Study window:  {t0.date()}  →  {study_end.date()}  ({total_days} days)")
+        _print("")
+        _print("SAMPLE:")
+        _print(f"  Total managers:          {n_total}")
+        _print(f"  Treated (trained):       {n_treated} ({pct_treated:.1f}%)")
+        _print(f"  Control (untrained):     {n_control} ({pct_control:.1f}%)")
+        _print("")
+        _print("EVENTS (Departures):")
+        _print(f"  Total events:            {n_events} ({event_rate:.1f}%)")
+        _print(f"  Events — Treated:        {n_events_treated} "
+               f"({event_rate_treated:.1f}% of treated)")
+        _print(f"  Events — Control:        {n_events_control} "
+               f"({event_rate_control:.1f}% of control)")
+        _print("")
+        _print("TIMING:")
+        _print(f"  Median days observed:    {median_days:.0f} days")
+        if not np.isnan(median_event_days):
+            _print(f"  Median days (events only): {median_event_days:.0f} days")
+        _print("")
+        _print("DEPARTURE BY QUARTER:")
+
+        # Crosstab of departure_quarter x treatment
+        quarter_crosstab = pd.crosstab(
+            result_df['departure_quarter'],
+            result_df[treatment_var],
+            margins=True,
+            margins_name='Total'
+        )
+        quarter_crosstab.columns = ['Control', 'Treated', 'Total']
+
+        # Reorder rows for logical flow
+        desired_order = ['Q1 (Jan-Mar)', 'Q2 (Apr-Jun)', 'Q3 (Jul-Sep)',
+                          'Q4 (Oct-Dec)', 'Censored', 'Total']
+        existing_rows = [r for r in desired_order if r in quarter_crosstab.index]
+        quarter_crosstab = quarter_crosstab.reindex(existing_rows)
+
+        if not _quiet:
+            display(quarter_crosstab)
+
+        _print("")
+        _print("CENSORED:")
+        _print(f"  Total censored:          {n_censored} ({censored_rate:.1f}%)")
+        _print(f"  Censored — Treated:      {n_censored_treated}")
+        _print(f"  Censored — Control:      {n_censored_control}")
+        _print("")
+        _print(f"✓ Survival columns added: '{time_col_name}' (days) and "
+               f"'{event_col_name}' (0/1)")
+        _print("=" * 60)
+
+        # ==================================================================
+        # STEP 6 — Return
+        # ==================================================================
+
+        return result_df
+
+    # ==================================================================
+    # Propensity score estimation
+    # ==================================================================
     
     def estimate_propensity_weights(
         self,
@@ -418,6 +699,383 @@ class IPTWGEEModel:
         except Exception as e:
             raise ValueError(f"GEE model fitting failed with formula '{formula}': {str(e)}")
     
+    def _fit_cox_model(self, data, time_var, event_var, treatment_var,
+                   weight_col, cluster_var=None, covariates=None,
+                   alpha=0.05, strata=None, auto_stratify=False,
+                   dummy_to_parent=None, strata_backup_map=None):
+        """
+        Fit IPTW-weighted Cox proportional hazards model with optional
+        automatic or manual stratification on categorical variables.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Data with time_var, event_var, treatment_var, weight_col, and covariates.
+        time_var : str
+            Name of time column (days_observed).
+        event_var : str
+            Name of event column (departed).
+        treatment_var : str
+            Binary treatment variable.
+        weight_col : str
+            IPTW weight column.
+        cluster_var : str, optional
+            Clustering variable for robust standard errors.
+        covariates : List[str], optional
+            Additional covariates for doubly robust estimation.
+        alpha : float, default 0.05
+            Significance level.
+        strata : list of str, optional
+            Column names to stratify the Cox baseline hazard on.
+            When provided, these columns are used directly (manual mode).
+        auto_stratify : bool, default False
+            If True, run an initial unstratified fit, test PH assumption,
+            and automatically stratify on parent categoricals whose dummies
+            show PH violations.  Requires *dummy_to_parent*.
+        dummy_to_parent : dict, optional
+            Mapping from one-hot dummy column name to its original
+            categorical parent column name (e.g. ``job_family_Communications``
+            -> ``job_family``).  Only needed when *auto_stratify* is True.
+        strata_backup_map : dict, optional
+            Mapping from cleaned parent categorical name to its backup column
+            name (e.g. ``job_family`` -> ``strata_job_family``).
+
+        Returns
+        -------
+        dict
+            Results dictionary with hazard ratio, CI, p-value, concordance,
+            proportional hazards test, KM curves, survival snapshots,
+            plus strata_vars and ph_violations_detected.
+        """
+        # ------------------------------------------------------------------
+        # Validate inputs
+        # ------------------------------------------------------------------
+        required_cols = [time_var, event_var, treatment_var, weight_col]
+        missing_cols = [c for c in required_cols if c not in data.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns: {missing_cols}")
+
+        treated_events = ((data[treatment_var] == 1) & (data[event_var] == 1)).sum()
+        control_events = ((data[treatment_var] == 0) & (data[event_var] == 1)).sum()
+
+        if treated_events < 5:
+            raise ValueError(f"Insufficient events in treated group: {treated_events} < 5")
+        if control_events < 5:
+            raise ValueError(f"Insufficient events in control group: {control_events} < 5")
+
+        # ------------------------------------------------------------------
+        # Helper: build cox_data, fit, return (cph, cox_data)
+        # ------------------------------------------------------------------
+        def _do_fit(formula_vars, strata_cols=None):
+            """Build cox_data from *formula_vars* and fit CoxPHFitter."""
+            keep = [time_var, event_var, weight_col] + formula_vars
+            if cluster_var and cluster_var in data.columns:
+                keep.append(cluster_var)
+            if strata_cols:
+                keep.extend([s for s in strata_cols if s not in keep])
+            keep = list(dict.fromkeys(keep))          # deduplicate, preserve order
+            _cox = data[keep].copy().dropna()
+
+            if len(_cox) < 20:
+                raise ValueError(f"Insufficient data for Cox model: {len(_cox)} rows")
+
+            _cph = CoxPHFitter()
+            fit_kw = dict(
+                duration_col=time_var,
+                event_col=event_var,
+                weights_col=weight_col,
+            )
+            if cluster_var and cluster_var in data.columns:
+                fit_kw["robust"] = True
+                fit_kw["cluster_col"] = cluster_var
+            if strata_cols:
+                fit_kw["strata"] = strata_cols
+
+            _cph.fit(_cox, **fit_kw)
+            return _cph, _cox
+
+        # ------------------------------------------------------------------
+        # Helper: run PH test, return list of violating variable names
+        # ------------------------------------------------------------------
+        def _ph_violations(cph_obj, cox_df, threshold):
+            """Return list of variable names that fail PH at *threshold*."""
+            try:
+                ph = cph_obj.check_assumptions(cox_df, p_value_threshold=threshold,
+                                            show_plots=False)
+                if hasattr(ph, "summary") and not ph.summary.empty:
+                    return list(ph.summary.index.get_level_values(0).unique())
+                return []
+            except Exception:
+                return []
+
+        # ------------------------------------------------------------------
+        # Build initial formula_vars
+        # ------------------------------------------------------------------
+        formula_vars = [treatment_var]
+        if covariates:
+            formula_vars.extend(covariates)
+
+        strata_cols = list(strata) if strata else None
+        ph_violations_detected = []
+        strata_vars_used = list(strata) if strata else []
+
+        # Initialize cph and cox_data (will be set by one of the paths below)
+        cph = None
+        cox_data = None
+
+        # ==================================================================
+        # PATH A: Manual strata — single fit with user-supplied strata
+        # ==================================================================
+        if strata_cols and not auto_stratify:
+            # Remove any strata columns from formula_vars (they stratify
+            # the baseline hazard, they should not appear as covariates)
+            formula_vars = [v for v in formula_vars if v not in strata_cols]
+            cph, cox_data = _do_fit(formula_vars, strata_cols=strata_cols)
+            print(f"  ℹ  Cox model stratified on (manual): {strata_cols}")
+
+        # ==================================================================
+        # PATH B: Auto-stratify — fit once, test PH, potentially re-fit
+        # ==================================================================
+        elif auto_stratify and dummy_to_parent:
+            # --- Initial unstratified fit ---
+            cph, cox_data = _do_fit(formula_vars)
+
+            violations = _ph_violations(cph, cox_data, alpha)
+            ph_violations_detected = list(violations)
+
+            if violations:
+                # Map violated dummies → parent categoricals
+                parents_to_stratify = set()
+                non_cat_violations = []
+                treatment_violated = False
+
+                for v in violations:
+                    if v == treatment_var:
+                        treatment_violated = True
+                        continue
+                    parent = dummy_to_parent.get(v)
+                    if parent:
+                        parents_to_stratify.add(parent)
+                    else:
+                        non_cat_violations.append(v)
+
+                if treatment_violated:
+                    print(
+                        f"  ⚠️  Treatment variable '{treatment_var}' shows PH violation "
+                        f"(p < {alpha}). Treatment is NOT stratified — consider RMST "
+                        f"as the primary effect measure."
+                    )
+                if non_cat_violations:
+                    print(
+                        f"  ⚠️  Non-categorical PH violations (not auto-stratified): "
+                        f"{non_cat_violations}"
+                    )
+
+                if parents_to_stratify:
+                    # Find backup strata columns via strata_backup_map
+                    _sbm = strata_backup_map or {}
+                    strata_cols = []
+                    dummies_to_remove = set()
+                    for parent in sorted(parents_to_stratify):
+                        backup_col = _sbm.get(parent)
+                        if backup_col and backup_col in data.columns:
+                            strata_cols.append(backup_col)
+                        elif parent in data.columns:
+                            strata_cols.append(parent)
+                        else:
+                            print(
+                                f"  Warning: Cannot stratify on '{parent}' — "
+                                f"column not found in data."
+                            )
+                            continue
+                        # Collect all dummies belonging to this parent
+                        for dummy_name, p in dummy_to_parent.items():
+                            if p == parent:
+                                dummies_to_remove.add(dummy_name)
+
+                    if strata_cols:
+                        # Remove parent dummies from formula
+                        formula_vars = [
+                            v for v in formula_vars if v not in dummies_to_remove
+                        ]
+                        # Re-fit with strata
+                        cph, cox_data = _do_fit(formula_vars, strata_cols=strata_cols)
+                        strata_vars_used = sorted(parents_to_stratify)
+                        print(
+                            f"  ✓ Auto-stratified Cox model on: {strata_vars_used} "
+                            f"(PH violations in dummies resolved via stratification)"
+                        )
+                        # Re-run PH test on the stratified model
+                        remaining = _ph_violations(cph, cox_data, alpha)
+                        if remaining:
+                            still_bad = [v for v in remaining if v != treatment_var]
+                            if still_bad:
+                                print(
+                                    f"  ⚠️  Remaining PH violations after stratification: "
+                                    f"{still_bad}"
+                                )
+                else:
+                    # Better messaging when no categorical violations
+                    if treatment_violated or non_cat_violations:
+                        print(
+                            f"  ⚠️  PH violations detected but cannot auto-stratify:"
+                        )
+                        if treatment_violated:
+                            print(f"      - Treatment variable '{treatment_var}' violates PH")
+                        if non_cat_violations:
+                            print(f"      - Non-categorical variables: {non_cat_violations}")
+                        print(f"      → Use RMST as primary effect measure.")
+            else:
+                print("  ✓ No PH violations detected (auto-stratify not needed).")
+
+        # ==================================================================
+        # PATH C: No strata, no auto-stratify — simple single fit
+        # ==================================================================
+        else:
+            cph, cox_data = _do_fit(formula_vars)
+            
+            # Check for PH violations and report them properly
+            violations = _ph_violations(cph, cox_data, alpha)
+            ph_violations_detected = list(violations)
+            
+            if violations:
+                print(f"  ⚠️  PH violations detected: {violations}")
+                print(f"      Consider using strata=['variable_name'] or RMST as primary effect measure.")
+            else:
+                print("  ✓ No PH violations detected.")
+
+        # ------------------------------------------------------------------
+        # Extract treatment effect (AFTER all paths complete)
+        # ------------------------------------------------------------------
+        if cph is None or cox_data is None:
+            raise ValueError("Cox model fitting failed - no model was created")
+        
+        hazard_ratio = float(cph.hazard_ratios_[treatment_var])
+        hr_ci = cph.confidence_intervals_.loc[treatment_var]
+        hr_ci_lower = float(hr_ci.iloc[0])
+        hr_ci_upper = float(hr_ci.iloc[1])
+        hr_pvalue = float(cph.summary.loc[treatment_var, 'p'])
+        concordance = float(cph.concordance_index_)
+
+        # ------------------------------------------------------------------
+        # PH test on final model (if not already done by auto-stratify)
+        # ------------------------------------------------------------------
+        ph_test_pvalue = None
+        ph_assumption_met = None
+        if not (auto_stratify and dummy_to_parent):
+            # Need to run PH test for manual-strata or no-strata paths
+            try:
+                ph_result = cph.check_assumptions(cox_data, p_value_threshold=alpha,
+                                                show_plots=False)
+                if hasattr(ph_result, "summary") and treatment_var in ph_result.summary.index.get_level_values(0):
+                    ph_test_pvalue = float(
+                        ph_result.summary.loc[treatment_var, "p"].iloc[0]
+                        if hasattr(ph_result.summary.loc[treatment_var, "p"], "iloc")
+                        else ph_result.summary.loc[treatment_var, "p"]
+                    )
+                    ph_assumption_met = ph_test_pvalue >= alpha
+                else:
+                    # Treatment passed PH (not in violations)
+                    ph_assumption_met = True
+            except Exception:
+                print("  Warning: Could not perform proportional hazards test")
+        else:
+            # Auto-stratify path: treatment PH status
+            if treatment_var in ph_violations_detected:
+                ph_assumption_met = False
+            else:
+                ph_assumption_met = True
+
+        # ------------------------------------------------------------------
+        # Fit IPTW-weighted Kaplan-Meier curves
+        # ------------------------------------------------------------------
+        treated_data = data[data[treatment_var] == 1]
+        control_data = data[data[treatment_var] == 0]
+
+        kmf_treated = KaplanMeierFitter()
+        kmf_control = KaplanMeierFitter()
+
+        try:
+            kmf_treated.fit(
+                durations=treated_data[time_var],
+                event_observed=treated_data[event_var],
+                weights=treated_data[weight_col],
+                label='Treated'
+            )
+            kmf_control.fit(
+                durations=control_data[time_var],
+                event_observed=control_data[event_var],
+                weights=control_data[weight_col],
+                label='Control'
+            )
+        except Exception as e:
+            raise ValueError(f"Kaplan-Meier fitting failed: {str(e)}")
+
+        # ------------------------------------------------------------------
+        # Survival probabilities at standard timepoints
+        # ------------------------------------------------------------------
+        snapshot_days = [90, 180, 270, 365]
+        survival_snapshots = []
+
+        for days in snapshot_days:
+            try:
+                surv_treated = float(kmf_treated.survival_function_at_times(days).iloc[0])
+                surv_control = float(kmf_control.survival_function_at_times(days).iloc[0])
+                surv_diff = surv_treated - surv_control
+                survival_snapshots.append({
+                    'timepoint_days': days,
+                    'timepoint_label': f'{days//30}mo' if days % 30 == 0 else f'{days}d',
+                    'survival_treated': surv_treated,
+                    'survival_control': surv_control,
+                    'survival_diff': surv_diff
+                })
+            except Exception:
+                survival_snapshots.append({
+                    'timepoint_days': days,
+                    'timepoint_label': f'{days//30}mo' if days % 30 == 0 else f'{days}d',
+                    'survival_treated': np.nan,
+                    'survival_control': np.nan,
+                    'survival_diff': np.nan
+                })
+
+        survival_at_snapshots = pd.DataFrame(survival_snapshots)
+
+        # ------------------------------------------------------------------
+        # Build coefficients DataFrame
+        # ------------------------------------------------------------------
+        n_events_treated = int(treated_events)
+        n_events_control = int(control_events)
+
+        coefficients_df = pd.DataFrame({
+            'Parameter': [treatment_var],
+            'Estimate': [np.log(hazard_ratio)],
+            'Std_Error': [(np.log(hr_ci_upper) - np.log(hr_ci_lower)) / (2 * 1.96)],
+            'CI_Lower': [np.log(hr_ci_lower)],
+            'CI_Upper': [np.log(hr_ci_upper)],
+            'P_Value_Raw': [hr_pvalue],
+            'Alpha': [alpha]
+        })
+
+        return {
+            'hazard_ratio': hazard_ratio,
+            'hr_ci_lower': hr_ci_lower,
+            'hr_ci_upper': hr_ci_upper,
+            'hr_pvalue': hr_pvalue,
+            'concordance': concordance,
+            'ph_test_pvalue': ph_test_pvalue,
+            'ph_assumption_met': ph_assumption_met,
+            'survival_at_snapshots': survival_at_snapshots,
+            'kmf_treated': kmf_treated,
+            'kmf_control': kmf_control,
+            'cox_model': cph,
+            'n_events_treated': n_events_treated,
+            'n_events_control': n_events_control,
+            'coefficients_df': coefficients_df,
+            'strata_vars': strata_vars_used,
+            'ph_violations_detected': ph_violations_detected,
+        }
+
+
     def plot_propensity_overlap(
         self,
         data: pd.DataFrame,
@@ -520,6 +1178,201 @@ class IPTWGEEModel:
         
         return fig
     
+    def plot_survival_curves(
+        self,
+        survival_result: Dict,
+        outcome_name: str = "Retention",
+        time_horizon: int = 365,
+        show_snapshots: bool = True,
+        snapshot_days: Optional[List[int]] = None,
+        figsize: Tuple[int, int] = (12, 8),
+        save_path: Optional[str] = None
+    ) -> object:
+        """
+        Plot IPTW-weighted Kaplan-Meier survival curves with confidence intervals,
+        snapshot overlays, and risk table.
+
+        Parameters
+        ----------
+        survival_result : dict
+            Output of analyze_survival_effect().
+        outcome_name : str, default "Retention"
+            Used in the plot title.
+        time_horizon : int, default 365
+            X-axis upper limit in days.
+        show_snapshots : bool, default True
+            If True, adds vertical dashed lines at snapshot_days.
+        snapshot_days : List[int], optional
+            Timepoints to mark. Defaults to [90, 180, 270, 365].
+        figsize : tuple, default (12, 8)
+            Figure dimensions.
+        save_path : str, optional
+            If provided, saves figure to this path.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
+        kmf_treated = survival_result.get("kmf_treated")
+        kmf_control = survival_result.get("kmf_control")
+
+        if kmf_treated is None or kmf_control is None:
+            raise ValueError(
+                "survival_result must contain 'kmf_treated' and 'kmf_control'. "
+                "Run analyze_survival_effect() first."
+            )
+
+        if snapshot_days is None:
+            snapshot_days = [90, 180, 270, 365]
+
+        snapshot_labels = {90: "3 mo", 180: "6 mo", 270: "9 mo", 365: "12 mo"}
+
+        hr        = survival_result.get("hazard_ratio")
+        hr_lower  = survival_result.get("hr_ci_lower")
+        hr_upper  = survival_result.get("hr_ci_upper")
+        hr_pvalue = survival_result.get("hr_pvalue")
+        estimand  = survival_result.get("estimand", "ATT")
+
+        n_events_treated = survival_result.get("n_events_treated", "?")
+        n_events_control = survival_result.get("n_events_control", "?")
+
+        # --- Build figure with main plot + risk table ---
+        fig, (ax_main, ax_risk) = plt.subplots(
+            2, 1,
+            figsize=figsize,
+            gridspec_kw={"height_ratios": [4, 1]}
+        )
+
+        # --- Main KM plot ---
+        color_treated = "#2196F3"   # blue
+        color_control = "#FF5722"   # orange-red
+
+        # Plot treated curve with CI
+        kmf_treated.plot_survival_function(
+            ax=ax_main,
+            ci_show=True,
+            color=color_treated,
+            label=f"Trained (events={n_events_treated})"
+        )
+
+        # Plot control curve with CI
+        kmf_control.plot_survival_function(
+            ax=ax_main,
+            ci_show=True,
+            color=color_control,
+            label=f"Untrained (events={n_events_control})"
+        )
+
+        # Snapshot vertical lines
+        if show_snapshots:
+            for day in snapshot_days:
+                if day <= time_horizon:
+                    label = snapshot_labels.get(day, f"{day}d")
+                    ax_main.axvline(
+                        x=day, color="gray", linestyle="--",
+                        linewidth=0.8, alpha=0.6
+                    )
+                    ax_main.text(
+                        day + 3, 0.02, label,
+                        fontsize=8, color="gray", va="bottom"
+                    )
+
+        # HR annotation box
+        if hr is not None and hr_lower is not None and hr_upper is not None:
+            alpha_val = survival_result.get("alpha", 0.05)
+            ci_pct    = int((1 - alpha_val) * 100)
+            stars     = self._significance_stars(hr_pvalue) if hr_pvalue is not None else ""
+            p_str     = f"p = {hr_pvalue:.3f}" if hr_pvalue is not None else ""
+            hr_text   = (
+                f"HR = {hr:.3f}\n"
+                f"{ci_pct}% CI: [{hr_lower:.3f}–{hr_upper:.3f}]\n"
+                f"{p_str} {stars}"
+            )
+            ax_main.text(
+                0.97, 0.97, hr_text,
+                transform=ax_main.transAxes,
+                fontsize=9,
+                verticalalignment="top",
+                horizontalalignment="right",
+                bbox=dict(boxstyle="round,pad=0.4", facecolor="white",
+                        edgecolor="gray", alpha=0.8)
+            )
+
+        ax_main.set_xlim(0, time_horizon)
+        ax_main.set_ylim(0, 1.05)
+        ax_main.set_xlabel("Days Since Study Start (T=0)", fontsize=11)
+        ax_main.set_ylabel("Probability of Retention", fontsize=11)
+        ax_main.set_title(
+            f"IPTW-Weighted Survival Curves — {outcome_name} ({estimand})",
+            fontsize=13, fontweight="bold"
+        )
+        ax_main.legend(fontsize=10, loc="lower left")
+        ax_main.grid(True, alpha=0.3)
+
+        # --- Risk table ---
+        ax_risk.axis("off")
+        risk_timepoints = [d for d in snapshot_days if d <= time_horizon]
+
+        # Compute N at risk at each timepoint
+        def n_at_risk(kmf, timepoint):
+            """Return number at risk at a given timepoint from KM fitter."""
+            try:
+                timeline = kmf.event_table.index
+                idx = timeline[timeline <= timepoint]
+                if len(idx) == 0:
+                    return int(kmf.event_table["at_risk"].iloc[0])
+                return int(kmf.event_table.loc[idx[-1], "at_risk"])
+            except Exception:
+                return "?"
+
+        risk_rows = {
+            "Trained":   [n_at_risk(kmf_treated, d) for d in risk_timepoints],
+            "Untrained": [n_at_risk(kmf_control, d) for d in risk_timepoints],
+        }
+
+        col_labels = [snapshot_labels.get(d, f"{d}d") for d in risk_timepoints]
+        table_data = [risk_rows["Trained"], risk_rows["Untrained"]]
+        row_labels = ["Trained", "Untrained"]
+
+        tbl = ax_risk.table(
+            cellText=table_data,
+            rowLabels=row_labels,
+            colLabels=col_labels,
+            cellLoc="center",
+            loc="center"
+        )
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(9)
+        tbl.scale(1, 1.4)
+
+        # Color row headers to match curves
+        for (row, col), cell in tbl.get_celld().items():
+            if col == -1:
+                if row == 1:
+                    cell.set_facecolor(color_treated)
+                    cell.set_text_props(color="white", fontweight="bold")
+                elif row == 2:
+                    cell.set_facecolor(color_control)
+                    cell.set_text_props(color="white", fontweight="bold")
+
+        ax_risk.set_title("Number at Risk", fontsize=9, loc="left", pad=2)
+
+        # Footnote
+        fig.text(
+            0.5, 0.01,
+            f"Curves represent IPTW-weighted Kaplan-Meier estimates ({estimand}). "
+            f"HR < 1 indicates lower hazard of departure (protective effect of training).",
+            ha="center", va="bottom", fontsize=8, color="dimgray"
+        )
+
+        plt.tight_layout(rect=[0, 0.04, 1, 1])
+
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches="tight")
+
+        plt.show()
+        return fig   
+
     def analyze_treatment_effect(
         self,
         data: pd.DataFrame,
@@ -1751,6 +2604,555 @@ class IPTWGEEModel:
         """
         print(help_text)
 
+
+    def analyze_survival_effect(
+    self,
+    data: pd.DataFrame,
+    time_var: str,
+    event_var: str,
+    treatment_var: str,
+    categorical_vars: List[str],
+    binary_vars: List[str],
+    continuous_vars: List[str],
+    cluster_var: str,
+    estimand: str = "ATT",
+    project_path: Optional[str] = None,
+    trim_quantile: float = 0.99,
+    analysis_name: Optional[str] = None,
+    alpha: float = 0.05,
+    plot_propensity: bool = True,
+    plot_weights: bool = True,
+    strata: Optional[object] = "auto",
+) -> Dict:
+        """
+        Complete survival analysis pipeline: IPTW propensity weights → Cox proportional hazards.
+
+        Implements the same Steps 0-2 as analyze_treatment_effect() but replaces
+        Step 3 (GEE outcome model) with Cox proportional hazards model for
+        time-to-event outcomes like employee retention.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Dataset with time_var, event_var, treatment, and covariates
+        time_var : str
+            Name of time column (days from T=0 to event/censoring)
+        event_var : str
+            Name of event indicator column (1=event occurred, 0=censored)
+        treatment_var : str
+            Name of binary treatment variable
+        categorical_vars : List[str]
+            Categorical covariate names (will be one-hot encoded)
+        binary_vars : List[str]
+            Binary covariate names
+        continuous_vars : List[str]
+            Continuous covariate names
+        cluster_var : str
+            Name of clustering variable for robust standard errors
+        estimand : str, default="ATT"
+            Target estimand: "ATE" or "ATT". Determines IPTW weight construction.
+        project_path : str, optional
+            Path to save results Excel file
+        trim_quantile : float, default=0.99
+            Quantile for weight trimming
+        analysis_name : str, optional
+            Analysis identifier for file naming
+        alpha : float, default=0.05
+            Significance level for confidence intervals
+        plot_propensity : bool, default=True
+            If True, generates propensity score overlap plot
+        plot_weights : bool, default=True
+            If True, generates IPTW weight distribution plot
+
+        Returns
+        -------
+        dict
+            Dictionary with keys compatible with build_summary_table():
+            - effect: hazard ratio (not log hazard ratio)
+            - estimand: "ATE" or "ATT"
+            - ci_lower, ci_upper: HR confidence interval bounds
+            - p_value: p-value for treatment effect
+            - significant: boolean significance at alpha level
+            - alpha: significance level used
+            - cohens_d: None (not applicable to survival)
+            - pct_change: None (not applicable to survival)
+            - mean_treatment: survival probability at 365 days for treated
+            - mean_control: survival probability at 365 days for control
+            - outcome_type: "survival"
+            - coefficients_df: DataFrame with log HR for compatibility
+            - balance_df: post-weighting balance statistics
+            - weight_diagnostics: weight summary statistics
+            - weighted_df: processed data with weights
+
+            Plus survival-specific keys:
+            - hazard_ratio: treatment hazard ratio
+            - ph_assumption_met: proportional hazards test result
+            - ph_test_pvalue: PH test p-value
+            - kmf_treated, kmf_control: fitted Kaplan-Meier objects
+            - survival_at_snapshots: DataFrame with survival at 90,180,270,365 days
+            - n_events_treated, n_events_control: event counts
+            - cox_model: fitted CoxPHFitter object
+
+        Raises
+        ------
+        ValueError
+            If data preparation, model fitting, or validation fails
+        ImportError
+            If lifelines package is not installed
+        """
+        # Validate estimand
+        estimand = estimand.upper()
+        if estimand not in ["ATE", "ATT"]:
+            raise ValueError(f"estimand must be 'ATE' or 'ATT', got '{estimand}'")
+
+        # ------------------------------------------------------------------
+        # STEP 0: Data prep (mirrors analyze_treatment_effect Step 0)
+        # ------------------------------------------------------------------
+        # Survival analysis has no baseline_var — the time/event structure
+        # already encodes the temporal dimension.
+        ps_covariates_raw = categorical_vars + binary_vars + continuous_vars
+        outcome_covariates_raw = list(ps_covariates_raw)
+
+        all_needed = list(set(
+            [time_var, event_var, treatment_var, cluster_var] + outcome_covariates_raw
+        ))
+        df = data[all_needed].dropna().copy()
+
+        # Validate minimum data requirements
+        if len(df) < 10:
+            raise ValueError(
+                f"Insufficient data after removing missing values: {len(df)} rows remaining"
+            )
+
+        if df[treatment_var].nunique() < 2:
+            raise ValueError(
+                f"Only one treatment group present in data: {df[treatment_var].unique()}"
+            )
+
+        treatment_counts = df[treatment_var].value_counts()
+        if treatment_counts.min() < 5:
+            raise ValueError(
+                f"Insufficient observations in treatment groups. "
+                f"Counts: {treatment_counts.to_dict()}"
+            )
+
+        # Validate survival-specific columns
+        if df[event_var].sum() < 10:
+            raise ValueError(
+                f"Insufficient events for survival analysis: "
+                f"{int(df[event_var].sum())} events (minimum 10 required)"
+            )
+
+        if (df[time_var] <= 0).any():
+            n_bad = int((df[time_var] <= 0).sum())
+            raise ValueError(
+                f"{n_bad} observations have {time_var} <= 0. "
+                f"All survival times must be positive. "
+                f"Run prepare_survival_data() to check data quality."
+            )
+
+        # --- Preserve original categorical columns for potential stratification ---
+        # These backup columns survive one-hot encoding and allow lifelines
+        # to stratify the baseline hazard on the original factor.
+        # NOTE: _clean_column_name() collapses '__' and strips leading '_',
+        #       so we track the *cleaned* backup names explicitly.
+        cleaned_cat_vars = [self._clean_column_name(v) for v in categorical_vars]
+        _strata_backup_map = {}   # cleaned_parent -> cleaned_backup_col_name
+        for var in categorical_vars:
+            raw_backup = f"__strata_{var}"
+            df[raw_backup] = df[var]
+            cleaned_backup = self._clean_column_name(raw_backup)
+            cleaned_parent = self._clean_column_name(var)
+            _strata_backup_map[cleaned_parent] = cleaned_backup
+
+        # --- One-hot encode categorical variables ---
+        cols_before_dummies = set(df.columns)
+        df = pd.get_dummies(df, columns=categorical_vars, drop_first=True)
+        dummy_columns = sorted(set(df.columns) - cols_before_dummies)
+
+        # --- Clean all column names (same logic as analyze_treatment_effect) ---
+        rename_map = {c: self._clean_column_name(c) for c in df.columns}
+        df.rename(columns=rename_map, inplace=True)
+
+        # Remap key variable references after cleaning
+        time_var      = self._clean_column_name(time_var)
+        event_var     = self._clean_column_name(event_var)
+        treatment_var = self._clean_column_name(treatment_var)
+        cluster_var   = self._clean_column_name(cluster_var)
+
+        # Remap covariate lists
+        continuous_vars = [self._clean_column_name(v) for v in continuous_vars]
+        binary_vars     = [self._clean_column_name(v) for v in binary_vars]
+        dummy_columns   = [self._clean_column_name(c) for c in dummy_columns]
+
+        # --- Build dummy → parent mapping for auto-stratification ---
+        # Maps each one-hot dummy (e.g. 'job_family_Communications') back to
+        # its original parent categorical (e.g. 'job_family').
+        dummy_to_parent = {}
+        for dummy in dummy_columns:
+            for parent in cleaned_cat_vars:
+                if dummy.startswith(parent + "_"):
+                    dummy_to_parent[dummy] = parent
+                    break
+
+        # --- Track balance variables ---
+        balance_var_names = (
+            [v for v in continuous_vars if v in df.columns]
+            + [v for v in binary_vars     if v in df.columns]
+            + [dc for dc in dummy_columns if dc in df.columns]
+        )
+        balance_var_types = {v: "continuous" for v in continuous_vars if v in df.columns}
+        balance_var_types.update({v: "binary"     for v in binary_vars     if v in df.columns})
+        balance_var_types.update({dc: "categorical" for dc in dummy_columns if dc in df.columns})
+
+        # Build covariate list — exclude time/event/treatment/cluster and strata backups
+        _strata_backup_cols = set(_strata_backup_map.values())
+        covariates = [
+            c for c in df.columns
+            if c not in [time_var, event_var, treatment_var, cluster_var]
+            and c not in _strata_backup_cols
+        ]
+        ps_covariates = list(covariates)
+
+        # Remove constant variables (cause issues in PS model)
+        constant_vars = [var for var in covariates if df[var].nunique() <= 1]
+        if constant_vars:
+            print(f"  Warning: Removing constant variables: {constant_vars}")
+            covariates    = [v for v in covariates    if v not in constant_vars]
+            ps_covariates = [v for v in ps_covariates if v not in constant_vars]
+            if len(covariates) == 0:
+                raise ValueError(
+                    "No valid covariates remaining after removing constant variables"
+                )
+
+        # ------------------------------------------------------------------
+        # STEP 1: Estimate propensity weights
+        # Identical reuse of existing method — no changes needed.
+        # ------------------------------------------------------------------
+        try:
+            df, ps_model = self.estimate_propensity_weights(
+                df,
+                treatment_var,
+                ps_covariates,
+                estimand=estimand,
+                cluster_var=cluster_var,
+                trim_quantile=trim_quantile
+            )
+        except Exception as e:
+            raise ValueError(f"Error estimating propensity scores: {str(e)}")
+
+        # ------------------------------------------------------------------
+        # STEP 1b: Positivity / overlap warning (identical to GEE pipeline)
+        # ------------------------------------------------------------------
+        ps_vals    = df["propensity_score"]
+        n_near_zero = (ps_vals < 0.01).sum()
+        n_near_one  = (ps_vals > 0.99).sum()
+        if n_near_zero > 0 or n_near_one > 0:
+            print(
+                f"  Warning: Positivity concern: {n_near_zero} observations with PS < 0.01, "
+                f"{n_near_one} with PS > 0.99"
+            )
+
+        # ------------------------------------------------------------------
+        # STEP 1c: Propensity score overlap plot (identical reuse)
+        # ------------------------------------------------------------------
+        ps_overlap_fig = None
+        if plot_propensity:
+            ps_plot_title = (
+                f"Propensity Score Overlap — Survival Analysis ({estimand})"
+            )
+            try:
+                ps_overlap_fig = self.plot_propensity_overlap(
+                    data=df,
+                    treatment_var=treatment_var,
+                    title=ps_plot_title
+                )
+            except Exception as e:
+                print(f"  Warning: Could not generate propensity score plot: {e}")
+
+        # ------------------------------------------------------------------
+        # STEP 2: Weight diagnostics (identical reuse)
+        # ------------------------------------------------------------------
+        try:
+            weight_stats = self.compute_weight_diagnostics(df)
+        except Exception as e:
+            raise ValueError(f"Error calculating weight diagnostics: {str(e)}")
+
+        # Weight distribution plot
+        weight_dist_fig = None
+        if plot_weights:
+            wt_plot_title = f"IPTW Weight Distribution — Survival Analysis ({estimand})"
+            try:
+                weight_dist_fig = self.plot_weight_distribution(
+                    data=df,
+                    treatment_var=treatment_var,
+                    estimand=estimand,
+                    title=wt_plot_title
+                )
+            except Exception as e:
+                print(f"  Warning: Could not generate weight distribution plot: {e}")
+
+        # ------------------------------------------------------------------
+        # STEP 2b: Post-weighting balance check (identical reuse via CausalDiagnostics)
+        # ------------------------------------------------------------------
+        _cd = CausalDiagnostics()
+        try:
+            _raw_balance = _cd.compute_balance_df(
+                data=df,
+                controls=balance_var_names,
+                treatment=treatment_var,
+                weights=df["iptw"],
+                already_encoded=True,
+            )
+            balance_results = []
+            for var_name in _raw_balance.index:
+                row = _raw_balance.loc[var_name]
+                smd_before  = row["Unweighted SMD"]
+                smd_after   = row["Weighted SMD"]
+                improvement = abs(smd_before) - abs(smd_after)
+                balance_results.append({
+                    "variable":                  var_name,
+                    "type":                      balance_var_types.get(var_name, "unknown"),
+                    "smd_before_weighting":      smd_before,
+                    "smd_after_weighting":       smd_after,
+                    "smd_improvement":           improvement,
+                    "balanced_before_weighting": abs(smd_before) < 0.1,
+                    "balanced_after_weighting":  abs(smd_after)  < 0.1,
+                })
+            balance_df = pd.DataFrame(balance_results)
+        except Exception as e:
+            print(
+                f"  Warning: CausalDiagnostics balance computation failed ({e}); "
+                f"balance_df will be empty."
+            )
+            balance_df = pd.DataFrame(columns=[
+                "variable", "type", "smd_before_weighting", "smd_after_weighting",
+                "smd_improvement", "balanced_before_weighting", "balanced_after_weighting"
+            ])
+
+        # Report balance summary
+        if not balance_df.empty and "balanced_after_weighting" in balance_df.columns:
+            n_imbalanced = int(balance_df["balanced_after_weighting"].eq(False).sum())
+            n_total_vars = len(balance_df)
+            if n_imbalanced == 0:
+                print(f"  ✓ Post-weighting balance: all {n_total_vars} covariates balanced (|SMD| < 0.1)")
+            else:
+                print(
+                    f"  ⚠️  Post-weighting balance: {n_imbalanced} of {n_total_vars} "
+                    f"covariates still imbalanced (|SMD| ≥ 0.1)"
+                )
+
+        # ------------------------------------------------------------------
+        # STEP 3: Fit IPTW-weighted Cox proportional hazards model
+        # Replaces fit_doubly_robust_model() from the GEE pipeline.
+        # ------------------------------------------------------------------
+        # Resolve strata mode
+        _manual_strata = None
+        _auto_stratify = False
+        if isinstance(strata, str) and strata.lower() == "auto":
+            _auto_stratify = True
+        elif isinstance(strata, list) and len(strata) > 0:
+            # Manual strata: map original var names to backup cols via _strata_backup_map
+            _manual_strata = []
+            _strata_dummies_to_remove = set()
+            for s in strata:
+                s_clean = self._clean_column_name(s)
+                backup = _strata_backup_map.get(s_clean)
+                if backup and backup in df.columns:
+                    _manual_strata.append(backup)
+                else:
+                    raise ValueError(
+                        f"Cannot stratify on '{s}': backup column not found. "
+                        f"Ensure it is in categorical_vars."
+                    )
+                # Remove this parent's dummies from covariates
+                for d, p in dummy_to_parent.items():
+                    if p == s_clean:
+                        _strata_dummies_to_remove.add(d)
+            covariates = [v for v in covariates if v not in _strata_dummies_to_remove]
+        # else: strata is None → no stratification
+
+        try:
+            cox_results = self._fit_cox_model(
+                data=df,
+                time_var=time_var,
+                event_var=event_var,
+                treatment_var=treatment_var,
+                weight_col="iptw",
+                cluster_var=cluster_var,
+                covariates=covariates,
+                alpha=alpha,
+                strata=_manual_strata,
+                auto_stratify=_auto_stratify,
+                dummy_to_parent=dummy_to_parent if _auto_stratify else None,
+                strata_backup_map=_strata_backup_map if _auto_stratify else None,
+            )
+        except Exception as e:
+            raise ValueError(f"Error fitting Cox model: {str(e)}")
+
+        # ------------------------------------------------------------------
+        # STEP 4: Extract results and build return dict
+        # ------------------------------------------------------------------
+        hazard_ratio  = cox_results["hazard_ratio"]
+        hr_ci_lower   = cox_results["hr_ci_lower"]
+        hr_ci_upper   = cox_results["hr_ci_upper"]
+        hr_pvalue     = cox_results["hr_pvalue"]
+        concordance   = cox_results["concordance"]
+
+        ph_assumption_met = cox_results.get("ph_assumption_met")
+        ph_test_pvalue    = cox_results.get("ph_test_pvalue")
+
+        # Warn if proportional hazards assumption is violated
+        if ph_assumption_met is False:
+            print(
+                f"  ⚠️  WARNING: Proportional hazards assumption may be violated "
+                f"(Schoenfeld test p = {ph_test_pvalue:.4f}). "
+                f"Consider RMST as the primary effect measure instead of the hazard ratio."
+            )
+        elif ph_assumption_met is True:
+            print(
+                f"  ✓ Proportional hazards assumption met "
+                f"(Schoenfeld test p = {ph_test_pvalue:.4f})"
+            )
+
+        # Significance
+        significant = hr_pvalue < alpha
+        stars       = self._significance_stars(hr_pvalue)
+
+        # Print summary line (mirrors analyze_treatment_effect print format)
+        ci_pct = int((1 - alpha) * 100)
+        print(
+            f"  [Survival] {estimand} HR = {hazard_ratio:.4f} "
+            f"({ci_pct}% CI: [{hr_ci_lower:.4f}, {hr_ci_upper:.4f}]), "
+            f"p = {hr_pvalue:.4f} {stars}, "
+            f"Concordance = {concordance:.4f}"
+        )
+
+        # --- Survival probabilities at 365 days for mean_treatment / mean_control ---
+        # These populate the mean_treatment / mean_control keys expected by
+        # build_summary_table() and generate_gee_summary_report().
+        survival_snapshots = cox_results.get("survival_at_snapshots", pd.DataFrame())
+        snap_365 = survival_snapshots[survival_snapshots["timepoint_days"] == 365]
+
+        if not snap_365.empty:
+            mean_treatment = float(snap_365["survival_treated"].iloc[0])
+            mean_control   = float(snap_365["survival_control"].iloc[0])
+        else:
+            # Fallback: use raw group proportions if 365-day snapshot unavailable
+            mean_treatment = float(
+                1 - df[df[treatment_var] == 1][event_var].mean()
+            )
+            mean_control = float(
+                1 - df[df[treatment_var] == 0][event_var].mean()
+            )
+
+        # --- Build coefficients_df (single-row, compatible with build_summary_table) ---
+        # Use log(HR) as the Estimate so the schema matches the GEE log-odds convention.
+        # The 'effect' key in the return dict carries the HR itself.
+        log_hr    = np.log(hazard_ratio)
+        log_hr_se = (np.log(hr_ci_upper) - np.log(hr_ci_lower)) / (2 * 1.96)
+
+        coefficients_df = pd.DataFrame({
+            "Parameter":   [treatment_var],
+            "Estimate":    [log_hr],
+            "Std_Error":   [log_hr_se],
+            "CI_Lower":    [np.log(hr_ci_lower)],
+            "CI_Upper":    [np.log(hr_ci_upper)],
+            "P_Value_Raw": [hr_pvalue],
+            "Alpha":       [alpha],
+        })
+
+        # --- Build propensity score model summary DataFrame ---
+        ps_summary_df = pd.DataFrame({
+            "Parameter": ps_model.params.index,
+            "Estimate":  ps_model.params.values,
+            "Std_Error": ps_model.bse.values,
+            "P_Value":   ps_model.pvalues.values,
+        })
+
+        # ------------------------------------------------------------------
+        # STEP 5: Export (optional, mirrors analyze_treatment_effect)
+        # ------------------------------------------------------------------
+        if project_path and analysis_name:
+            try:
+                export_path = (
+                    f"{project_path}/{estimand.lower()}_iptw_cox_{analysis_name}.xlsx"
+                )
+                with pd.ExcelWriter(export_path, engine="openpyxl") as writer:
+                    balance_df.to_excel(
+                        writer, sheet_name="Covariate_Balance", index=False
+                    )
+                    pd.DataFrame([weight_stats]).to_excel(
+                        writer, sheet_name="Weight_Diagnostics", index=False
+                    )
+                    coefficients_df.to_excel(
+                        writer, sheet_name=f"{estimand}_Cox", index=False
+                    )
+                    ps_summary_df.to_excel(
+                        writer, sheet_name="Propensity_Model", index=False
+                    )
+                    if not survival_snapshots.empty:
+                        survival_snapshots.to_excel(
+                            writer, sheet_name="Survival_Snapshots", index=False
+                        )
+                print(f"  Results saved to {export_path}")
+            except Exception as e:
+                print(f"  Warning: Could not export results to Excel: {e}")
+
+        # ------------------------------------------------------------------
+        # STEP 6: Build and return results dict
+        # ------------------------------------------------------------------
+        # Drop strata backup columns from weighted_df before returning
+        strata_backup_to_drop = list(_strata_backup_map.values())
+        df_clean = df.drop(columns=strata_backup_to_drop, errors="ignore")
+
+        return {
+            # --- Keys shared with analyze_treatment_effect() ---
+            # These ensure compatibility with build_summary_table(),
+            # compute_evalues_from_results(), and generate_gee_summary_report().
+            "effect":            hazard_ratio,       # HR (not log HR) as primary effect
+            "estimand":          estimand,
+            "ci_lower":          hr_ci_lower,        # HR CI lower bound
+            "ci_upper":          hr_ci_upper,        # HR CI upper bound
+            "p_value":           hr_pvalue,
+            "significant":       significant,
+            "alpha":             alpha,
+            "cohens_d":          None,               # Not applicable to survival
+            "pct_change":        None,               # Not applicable to survival
+            "mean_treatment":    mean_treatment,     # Survival prob at 365d (treated)
+            "mean_control":      mean_control,       # Survival prob at 365d (control)
+            "outcome_type":      "survival",
+            "coefficients_df":   coefficients_df,    # log(HR) row for schema compatibility
+            "full_coefficients_df": coefficients_df, # Same — no multi-param model here
+            "ps_model":          ps_model,
+            "ps_summary_df":     ps_summary_df,
+            "balance_df":        balance_df,
+            "weight_diagnostics": weight_stats,
+            "ps_overlap_fig":    ps_overlap_fig,
+            "weight_dist_fig":   weight_dist_fig,
+            "weighted_df":       df_clean,           # Processed df with propensity_score & iptw
+
+            # --- Survival-specific keys ---
+            "hazard_ratio":          hazard_ratio,
+            "hr_ci_lower":           hr_ci_lower,
+            "hr_ci_upper":           hr_ci_upper,
+            "hr_pvalue":             hr_pvalue,
+            "concordance":           concordance,
+            "ph_assumption_met":     ph_assumption_met,
+            "ph_test_pvalue":        ph_test_pvalue,
+            "kmf_treated":           cox_results.get("kmf_treated"),
+            "kmf_control":           cox_results.get("kmf_control"),
+            "cox_model":             cox_results.get("cox_model"),
+            "survival_at_snapshots": survival_snapshots,
+            "n_events_treated":      cox_results.get("n_events_treated"),
+            "n_events_control":      cox_results.get("n_events_control"),
+
+            # --- Auto-stratification metadata ---
+            "strata_vars":           cox_results.get("strata_vars", []),
+            "ph_violations_detected": cox_results.get("ph_violations_detected", []),
+        }
+
+
     #Sensitivity analysis function for unmeasured confounding using E-values
     def compute_evalue(
         self,
@@ -1959,7 +3361,7 @@ class IPTWGEEModel:
             - Robustness classification
             - Interpretation string
         """
-        model = IPTWGEEModel()
+        model = CausalInferenceModel()
         rows = []
         
         for outcome_name, res in results_dict.items():
@@ -2205,7 +3607,7 @@ class IPTWGEEModel:
         summary_df["P_Value_Corrected"] = pvals_corrected
         summary_df["Significant"] = reject_arr
         summary_df["Significance"] = [
-            IPTWGEEModel._significance_stars(p) for p in pvals_corrected
+            CausalInferenceModel._significance_stars(p) for p in pvals_corrected
         ]
         summary_df["Correction_Method"] = correction_method
         
@@ -2264,6 +3666,359 @@ class IPTWGEEModel:
         
         return summary_df
 
+
+    @staticmethod
+    def compute_rmst_difference(
+        survival_result: Dict,
+        time_horizon: Optional[int] = None,
+        alpha: float = 0.05,
+        n_bootstrap: int = 500,
+        random_state: int = 42,
+        _quiet: bool = False
+    ) -> Dict:
+        """
+        Compute Restricted Mean Survival Time (RMST) difference between
+        treated and control groups.
+
+        RMST = area under the Kaplan-Meier survival curve up to time_horizon.
+        The RMST difference is the average number of additional days retained
+        within the study window attributable to treatment.
+
+        Parameters
+        ----------
+        survival_result : dict
+            Output of analyze_survival_effect().
+        time_horizon : int, optional
+            Upper time limit for RMST integration (days).
+            Defaults to 365 if not provided.
+        alpha : float, default 0.05
+            Significance level for confidence interval.
+        n_bootstrap : int, default 500
+            Number of bootstrap resamples for CI estimation.
+        random_state : int, default 42
+            Random seed for reproducibility.
+        _quiet : bool, default False
+            If True, suppress print output.
+
+        Returns
+        -------
+        dict
+            Keys: rmst_treated, rmst_control, rmst_diff,
+                rmst_ci_lower, rmst_ci_upper, time_horizon,
+                significant, rmst_df
+        """
+        def _print(msg=""):
+            if not _quiet:
+                print(msg)
+
+        if time_horizon is None:
+            time_horizon = 365
+
+        kmf_treated = survival_result.get("kmf_treated")
+        kmf_control = survival_result.get("kmf_control")
+
+        if kmf_treated is None or kmf_control is None:
+            raise ValueError(
+                "survival_result must contain 'kmf_treated' and 'kmf_control'. "
+                "Run analyze_survival_effect() first."
+            )
+
+        def _rmst_from_kmf(kmf, horizon):
+            """
+            Compute RMST as area under KM curve up to horizon
+            using the trapezoidal rule on the step function.
+            """
+            sf = kmf.survival_function_
+            times = sf.index.values
+            probs = sf.iloc[:, 0].values
+
+            # Clip to horizon
+            mask  = times <= horizon
+            t_clip = np.append(times[mask], horizon)
+            p_clip = np.append(probs[mask], probs[mask][-1] if mask.any() else 1.0)
+
+            # Trapezoidal integration
+            rmst = np.trapz(p_clip, t_clip)
+            return float(rmst)
+
+        rmst_treated = _rmst_from_kmf(kmf_treated, time_horizon)
+        rmst_control = _rmst_from_kmf(kmf_control, time_horizon)
+        rmst_diff    = rmst_treated - rmst_control
+
+        # --- Bootstrap CI for RMST difference ---
+        weighted_df = survival_result.get("weighted_df")
+        treatment_var = None
+
+        # Infer treatment variable from weighted_df columns
+        if weighted_df is not None:
+            # Find the treatment column (binary, not iptw/propensity_score)
+            candidate_cols = [
+                c for c in weighted_df.columns
+                if weighted_df[c].nunique() == 2
+                and set(weighted_df[c].dropna().unique()).issubset({0, 1, 0.0, 1.0})
+                and c not in ["iptw", "propensity_score"]
+            ]
+            if candidate_cols:
+                treatment_var = candidate_cols[0]
+
+        bootstrap_diffs = []
+        rng = np.random.default_rng(random_state)
+
+        if weighted_df is not None and treatment_var is not None:
+            # Find time and event columns
+            time_candidates  = [c for c in weighted_df.columns if "days" in c.lower() or "time" in c.lower()]
+            event_candidates = [c for c in weighted_df.columns if "depart" in c.lower() or "event" in c.lower()]
+
+            time_col  = time_candidates[0]  if time_candidates  else None
+            event_col = event_candidates[0] if event_candidates else None
+
+            if time_col and event_col:
+                for _ in range(n_bootstrap):
+                    boot_idx = rng.integers(0, len(weighted_df), size=len(weighted_df))
+                    boot_df  = weighted_df.iloc[boot_idx].reset_index(drop=True)
+
+                    treated_boot = boot_df[boot_df[treatment_var] == 1]
+                    control_boot = boot_df[boot_df[treatment_var] == 0]
+
+                    if len(treated_boot) < 5 or len(control_boot) < 5:
+                        continue
+
+                    try:
+                        kmf_t = KaplanMeierFitter()
+                        kmf_c = KaplanMeierFitter()
+                        kmf_t.fit(
+                            durations=treated_boot[time_col],
+                            event_observed=treated_boot[event_col],
+                            weights=treated_boot["iptw"]
+                        )
+                        kmf_c.fit(
+                            durations=control_boot[time_col],
+                            event_observed=control_boot[event_col],
+                            weights=control_boot["iptw"]
+                        )
+                        boot_diff = _rmst_from_kmf(kmf_t, time_horizon) - \
+                                    _rmst_from_kmf(kmf_c, time_horizon)
+                        bootstrap_diffs.append(boot_diff)
+                    except Exception:
+                        continue
+
+        if len(bootstrap_diffs) >= 50:
+            ci_lower = float(np.percentile(bootstrap_diffs, (alpha / 2) * 100))
+            ci_upper = float(np.percentile(bootstrap_diffs, (1 - alpha / 2) * 100))
+        else:
+            # Fallback: normal approximation if bootstrap failed
+            _print("  Warning: Bootstrap CI could not be computed. Using normal approximation.")
+            se_approx = abs(rmst_diff) * 0.2  # rough 20% SE approximation
+            z = 1.96
+            ci_lower = rmst_diff - z * se_approx
+            ci_upper = rmst_diff + z * se_approx
+
+        significant = not (ci_lower <= 0 <= ci_upper)
+
+        # --- Print results ---
+        direction = "longer" if rmst_diff >= 0 else "shorter"
+        _print("\n" + "=" * 60)
+        _print("RESTRICTED MEAN SURVIVAL TIME (RMST) ANALYSIS")
+        _print("=" * 60)
+        _print(f"Time horizon: {time_horizon} days")
+        _print("")
+        _print(f"  RMST (Trained):    {rmst_treated:.1f} days "
+            f"(out of {time_horizon} days)")
+        _print(f"  RMST (Untrained):  {rmst_control:.1f} days "
+            f"(out of {time_horizon} days)")
+        _print(f"  RMST Difference:   {rmst_diff:+.1f} days "
+            f"[{int((1-alpha)*100)}% CI: {ci_lower:+.1f}, {ci_upper:+.1f}]")
+        _print("")
+        _print(
+            f"  Interpretation: On average, trained managers remained employed "
+            f"{abs(rmst_diff):.1f} days {direction} than untrained managers "
+            f"within the {time_horizon}-day window."
+        )
+        if significant:
+            _print(f"  ✓ RMST difference is statistically significant "
+                f"(CI excludes 0).")
+        else:
+            _print(f"  The RMST difference is not statistically significant "
+                f"(CI includes 0).")
+        _print("=" * 60)
+
+        # --- Build rmst_df ---
+        rmst_df = pd.DataFrame([{
+            "time_horizon_days": time_horizon,
+            "rmst_treated":      round(rmst_treated, 2),
+            "rmst_control":      round(rmst_control, 2),
+            "rmst_diff":         round(rmst_diff, 2),
+            "rmst_ci_lower":     round(ci_lower, 2),
+            "rmst_ci_upper":     round(ci_upper, 2),
+            "significant":       significant,
+            "n_bootstrap":       len(bootstrap_diffs),
+        }])
+
+        return {
+            "rmst_treated":  rmst_treated,
+            "rmst_control":  rmst_control,
+            "rmst_diff":     rmst_diff,
+            "rmst_ci_lower": ci_lower,
+            "rmst_ci_upper": ci_upper,
+            "time_horizon":  time_horizon,
+            "significant":   significant,
+            "rmst_df":       rmst_df,
+        }
+
+
+    @staticmethod
+    def build_survival_summary_table(
+        survival_results_dict: Dict[str, Dict],
+        rmst_results_dict: Optional[Dict[str, Dict]] = None,
+        title: Optional[str] = None,
+        save_path: Optional[str] = None,
+        correction_method: str = "fdr_bh",
+        alpha: float = 0.05
+    ) -> pd.DataFrame:
+        """
+        Build a consolidated summary table of survival analysis results
+        across multiple retention outcomes.
+
+        Analogous to build_summary_table() but designed for survival outcomes,
+        reporting hazard ratios and RMST differences instead of mean differences
+        and Cohen's d.
+
+        Parameters
+        ----------
+        survival_results_dict : Dict[str, Dict]
+            Dictionary keyed by outcome name, where each value is the dict
+            returned by analyze_survival_effect().
+        rmst_results_dict : Dict[str, Dict], optional
+            Dictionary keyed by outcome name, where each value is the dict
+            returned by compute_rmst_difference(). If provided, RMST columns
+            are added to the summary table.
+        title : str, optional
+            Title printed above the table.
+        save_path : str, optional
+            If provided, saves the table to this path (.xlsx or .csv).
+        correction_method : str, default 'fdr_bh'
+            Multiple testing correction method.
+        alpha : float, default 0.05
+            Family-wise significance level.
+
+        Returns
+        -------
+        pd.DataFrame
+            Summary table with one row per outcome.
+        """
+        rows     = []
+        raw_pvals = []
+
+        for outcome_name, res in survival_results_dict.items():
+            hr        = res.get("hazard_ratio")
+            hr_lower  = res.get("hr_ci_lower")
+            hr_upper  = res.get("hr_ci_upper")
+            p_value   = res.get("p_value") or res.get("hr_pvalue")
+            estimand  = res.get("estimand", "ATT")
+            n_treated = res.get("n_events_treated", None)
+            n_control = res.get("n_events_control", None)
+            ph_met    = res.get("ph_assumption_met")
+            concordance = res.get("concordance")
+            weight_diag = res.get("weight_diagnostics", {})
+
+            raw_pvals.append(p_value if p_value is not None else 1.0)
+
+            row = {
+                "Outcome":              outcome_name,
+                "Estimand":             estimand,
+                "Hazard_Ratio":         round(hr, 4)      if hr       is not None else None,
+                "HR_CI_Lower":          round(hr_lower, 4) if hr_lower is not None else None,
+                "HR_CI_Upper":          round(hr_upper, 4) if hr_upper is not None else None,
+                "HR_95_CI":             (f"[{hr_lower:.3f}, {hr_upper:.3f}]"
+                                        if hr_lower is not None and hr_upper is not None
+                                        else None),
+                "P_Value":              p_value,
+                "Concordance":          round(concordance, 4) if concordance is not None else None,
+                "PH_Assumption_Met":    ph_met,
+                "N_Events_Treated":     n_treated,
+                "N_Events_Control":     n_control,
+                "N_Total":              weight_diag.get("n_observations"),
+                "ESS":                  weight_diag.get("effective_sample_size"),
+            }
+
+            # Add RMST columns if provided
+            if rmst_results_dict and outcome_name in rmst_results_dict:
+                rmst = rmst_results_dict[outcome_name]
+                row["RMST_Treated_Days"]  = round(rmst.get("rmst_treated", np.nan), 1)
+                row["RMST_Control_Days"]  = round(rmst.get("rmst_control", np.nan), 1)
+                row["RMST_Diff_Days"]     = round(rmst.get("rmst_diff",    np.nan), 1)
+                row["RMST_CI"]            = (
+                    f"[{rmst.get('rmst_ci_lower', np.nan):.1f}, "
+                    f"{rmst.get('rmst_ci_upper', np.nan):.1f}]"
+                )
+
+            rows.append(row)
+
+        summary_df = pd.DataFrame(rows)
+
+        # --- Multiple testing correction across outcomes ---
+        if len(raw_pvals) > 1:
+            reject_arr, pvals_corrected, _, _ = multipletests(
+                raw_pvals, alpha=alpha, method=correction_method
+            )
+        else:
+            pvals_corrected = np.array(raw_pvals)
+            reject_arr      = np.array([raw_pvals[0] < alpha])
+
+        summary_df["P_Value_Corrected"] = pvals_corrected
+        summary_df["Significant"]       = reject_arr
+        summary_df["Significance"]      = [
+            CausalInferenceModel._significance_stars(p) for p in pvals_corrected
+        ]
+        summary_df["Correction_Method"] = correction_method
+
+        # --- Print formatted table ---
+        display_title = title or "IPTW + Cox: Survival Analysis Summary"
+        print(f"\n{'=' * 65}")
+        print(f"  {display_title}")
+        print(f"{'=' * 65}")
+
+        # Select display columns (exclude raw CI bounds — use formatted string)
+        display_cols = [
+            c for c in summary_df.columns
+            if c not in ["HR_CI_Lower", "HR_CI_Upper"]
+        ]
+        display_df = summary_df[display_cols].copy()
+
+        for col in ["Hazard_Ratio", "Concordance"]:
+            if col in display_df.columns:
+                display_df[col] = display_df[col].apply(
+                    lambda x: f"{x:.4f}" if pd.notna(x) else "—"
+                )
+        for col in ["P_Value", "P_Value_Corrected"]:
+            if col in display_df.columns:
+                display_df[col] = display_df[col].apply(
+                    lambda x: f"{x:.4f}" if pd.notna(x) else "—"
+                )
+        if "ESS" in display_df.columns:
+            display_df["ESS"] = display_df["ESS"].apply(
+                lambda x: f"{x:.1f}" if pd.notna(x) else "—"
+            )
+
+        print(display_df.to_string(index=False))
+        print(f"{'=' * 65}")
+        print("  Significance: *** p<0.001, ** p<0.01, * p<0.05")
+        print(f"  Correction: {correction_method} across {len(rows)} outcomes")
+        print("  HR < 1 = lower hazard of departure (training is protective)")
+        print()
+
+        # --- Save if requested ---
+        if save_path:
+            if save_path.endswith(".xlsx"):
+                summary_df.to_excel(save_path, index=False, engine="openpyxl")
+            elif save_path.endswith(".csv"):
+                summary_df.to_csv(save_path, index=False)
+            else:
+                summary_df.to_excel(save_path + ".xlsx", index=False, engine="openpyxl")
+            print(f"  Survival summary table saved to {save_path}")
+
+        return summary_df
+
     # ==================================================================
     # Report generation methods
     # ==================================================================
@@ -2279,7 +4034,7 @@ class IPTWGEEModel:
             return f"{p:.3f}"
 
     @staticmethod
-    def generate_summary_report(
+    def generate_gee_summary_report(
         summary_df: pd.DataFrame,
         evalues_df: pd.DataFrame,
         results_dict: Dict[str, Dict],
@@ -2325,7 +4080,7 @@ class IPTWGEEModel:
         if outcome_valence is None:
             outcome_valence = {}
 
-        fmt_p = IPTWGEEModel._format_pvalue
+        fmt_p = CausalInferenceModel._format_pvalue
         lines: list = []
 
         # Detect outcome type from first result
@@ -2605,6 +4360,331 @@ class IPTWGEEModel:
         return "\n".join(lines)
 
     @staticmethod
+    def generate_survival_summary_report(
+        survival_summary_df: pd.DataFrame,
+        survival_evalues_df: pd.DataFrame,
+        survival_results_dict: Dict[str, Dict],
+        estimand: str,
+        outcome_descriptions: Optional[Dict[str, str]] = None,
+        outcome_valence: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """
+        Generate a Markdown technical summary for survival (time-to-event) outcomes.
+
+        Produces a report structured around hazard ratios, RMST differences,
+        and survival probabilities at snapshot timepoints. Designed to be
+        rendered alongside generate_gee_summary_report() in the ATE/ATT
+        technical summary cells.
+
+        Parameters
+        ----------
+        survival_summary_df : pd.DataFrame
+            Output of ``build_survival_summary_table()`` for retention outcomes.
+        survival_evalues_df : pd.DataFrame
+            Output of ``compute_evalues_from_results()`` for retention outcomes.
+            Should be computed with effect_type='risk_ratio'.
+        survival_results_dict : Dict[str, Dict]
+            Per-outcome results from ``analyze_survival_effect()``.
+            Keys are outcome names (e.g. 'retention'), values are result dicts.
+        estimand : str
+            "ATE" or "ATT".
+        outcome_descriptions : Dict[str, str], optional
+            Mapping from variable names to display-friendly names.
+            e.g. {'retention': 'Manager Retention (Survival)'}
+        outcome_valence : Dict[str, str], optional
+            Not used for survival outcomes (HR direction is self-explanatory),
+            but accepted for API consistency with generate_gee_summary_report().
+
+        Returns
+        -------
+        str
+            Markdown-formatted summary string.
+        """
+        if outcome_descriptions is None:
+            outcome_descriptions = {}
+
+        fmt_p = CausalInferenceModel._format_pvalue
+        lines: list = []
+
+        n_tests = len(survival_summary_df)
+        correction = (
+            survival_summary_df["Correction_Method"].iloc[0].upper()
+            if "Correction_Method" in survival_summary_df.columns
+            else "FDR_BH"
+        )
+
+        lines.append(
+            f"#### Retention Outcomes — Survival Analysis "
+            f"({n_tests} test{'s' if n_tests != 1 else ''}, {correction}-corrected)"
+        )
+        lines.append("")
+        lines.append(
+            "> **Method**: IPTW-weighted Cox Proportional Hazards model. "
+            "Hazard Ratio (HR) < 1 indicates lower hazard of departure "
+            "(i.e., training is protective). "
+            "RMST Difference = additional days retained within the study window."
+        )
+        lines.append("")
+
+        # ── Results table ──────────────────────────────────────────────────
+        # Determine which optional columns are present
+        has_rmst = "RMST_Difference" in survival_summary_df.columns
+        has_ph   = "PH_Assumption_Met" in survival_summary_df.columns
+
+        header_cols = [
+            f"| Outcome | {estimand} (HR) | 95% CI | p (corrected) | Significant?"
+        ]
+        sep_cols = ["|---------|----------------|--------|---------------|-------------|"]
+
+        if has_rmst:
+            header_cols[0] += " | RMST Diff (days) | RMST 95% CI"
+            sep_cols[0]    += "------------------|-------------|"
+        if has_ph:
+            header_cols[0] += " | PH Assumption"
+            sep_cols[0]    += "----------------|"
+        header_cols[0] += " |"
+        sep_cols[0]    += ""
+
+        lines.append(header_cols[0])
+        lines.append(sep_cols[0])
+
+        for _, row in survival_summary_df.iterrows():
+            outcome = row["Outcome"]
+            name    = outcome_descriptions.get(outcome, outcome)
+            hr      = row.get("Hazard_Ratio", row.get("Effect", float("nan")))
+            ci_lo   = row.get("HR_CI_Lower",  row.get("CI_Lower", float("nan")))
+            ci_hi   = row.get("HR_CI_Upper",  row.get("CI_Upper", float("nan")))
+            p_corr  = row.get("P_Value_Corrected", row.get("P_Value", float("nan")))
+            sig     = row.get("Significant", False)
+            stars   = row.get("Significance", "")
+
+            sig_str = f"Yes {stars}" if sig else "No"
+
+            # Format HR and CI safely
+            hr_str    = f"**{hr:.3f}**"   if pd.notna(hr)    else "—"
+            ci_lo_str = f"{ci_lo:.3f}"    if pd.notna(ci_lo) else "—"
+            ci_hi_str = f"{ci_hi:.3f}"    if pd.notna(ci_hi) else "—"
+            p_str     = fmt_p(p_corr)     if pd.notna(p_corr) else "—"
+
+            row_str = (
+                f"| {name} | {hr_str} | [{ci_lo_str}, {ci_hi_str}] "
+                f"| {p_str} | {sig_str}"
+            )
+
+            if has_rmst:
+                rmst_diff    = row.get("RMST_Difference", float("nan"))
+                rmst_ci_lo   = row.get("RMST_CI_Lower",   float("nan"))
+                rmst_ci_hi   = row.get("RMST_CI_Upper",   float("nan"))
+                rmst_str     = f"**+{rmst_diff:.1f}**" if pd.notna(rmst_diff) and rmst_diff >= 0 \
+                            else (f"**{rmst_diff:.1f}**" if pd.notna(rmst_diff) else "—")
+                rmst_ci_str  = (
+                    f"[{rmst_ci_lo:.1f}, {rmst_ci_hi:.1f}]"
+                    if pd.notna(rmst_ci_lo) and pd.notna(rmst_ci_hi) else "—"
+                )
+                row_str += f" | {rmst_str} | {rmst_ci_str}"
+
+            if has_ph:
+                ph_met = row.get("PH_Assumption_Met", None)
+                if ph_met is True:
+                    ph_str = "✅ Met"
+                elif ph_met is False:
+                    ph_str = "⚠️ Violated"
+                else:
+                    ph_str = "—"
+                row_str += f" | {ph_str}"
+
+            row_str += " |"
+            lines.append(row_str)
+
+        lines.append("")
+
+        # ── Per-outcome narrative ──────────────────────────────────────────
+        for _, row in survival_summary_df.iterrows():
+            outcome = row["Outcome"]
+            name    = outcome_descriptions.get(outcome, outcome)
+            hr      = row.get("Hazard_Ratio", row.get("Effect", float("nan")))
+            sig     = row.get("Significant", False)
+            p_corr  = row.get("P_Value_Corrected", row.get("P_Value", float("nan")))
+            stars   = row.get("Significance", "")
+
+            res = survival_results_dict.get(outcome, {})
+            rmst_diff  = res.get("rmst_diff")
+            n_events_t = res.get("n_events_treated")
+            n_events_c = res.get("n_events_control")
+            n_treated  = res.get("n_treated")
+            n_control  = res.get("n_control")
+            ph_met     = res.get("ph_assumption_met")
+
+            # Survival probabilities at 365 days
+            surv_t = res.get("mean_treatment")  # survival at horizon for treated
+            surv_c = res.get("mean_control")    # survival at horizon for control
+
+            if sig and pd.notna(hr):
+                direction = "lower" if hr < 1 else "higher"
+                pct_change = abs(1 - hr) * 100
+                lines.append(f"**{name}** {stars}")
+                lines.append(
+                    f"- Hazard Ratio = **{hr:.3f}** — trained managers had "
+                    f"**{pct_change:.1f}% {direction} hazard of departure** "
+                    f"compared to untrained managers."
+                )
+                if rmst_diff is not None and pd.notna(rmst_diff):
+                    direction_rmst = "longer" if rmst_diff > 0 else "shorter"
+                    lines.append(
+                        f"- RMST Difference = **{rmst_diff:+.1f} days** — on average, "
+                        f"trained managers remained employed **{abs(rmst_diff):.1f} days "
+                        f"{direction_rmst}** within the study window."
+                    )
+                if surv_t is not None and surv_c is not None and pd.notna(surv_t) and pd.notna(surv_c):
+                    lines.append(
+                        f"- Estimated 12-month retention: "
+                        f"**{surv_t*100:.1f}%** (trained) vs. "
+                        f"**{surv_c*100:.1f}%** (untrained)."
+                    )
+                if n_events_t is not None and n_events_c is not None:
+                    lines.append(
+                        f"- Events observed: {n_events_t} departures (trained, n={n_treated}) "
+                        f"/ {n_events_c} departures (untrained, n={n_control})."
+                    )
+                if ph_met is False:
+                    lines.append(
+                        "- ⚠️ **Proportional hazards assumption may be violated.** "
+                        "The hazard ratio should be interpreted as an average effect "
+                        "over the study period. Consider RMST difference as the primary "
+                        "effect measure."
+                    )
+                lines.append("")
+            else:
+                lines.append(f"**{name}** — *No significant effect detected*")
+                p_str = fmt_p(p_corr) if pd.notna(p_corr) else "—"
+                hr_str = f"{hr:.3f}" if pd.notna(hr) else "—"
+                lines.append(
+                    f"- HR = {hr_str}, p = {p_str} (not significant after correction)."
+                )
+                lines.append("")
+
+        # ── How to read hazard ratios ──────────────────────────────────────
+        lines.append("**How to read hazard ratios:**")
+        lines.append(
+            "A hazard ratio (HR) below 1.0 means trained managers were *less likely* "
+            "to depart at any given point in time compared to untrained managers. "
+            "For example, HR = 0.70 means a 30% lower instantaneous departure rate. "
+            "The RMST difference translates this into a concrete number of additional "
+            "days retained within the 12-month study window."
+        )
+        lines.append("")
+
+        # ── Snapshot validation ────────────────────────────────────────────
+        # Check if survival_at_snapshots is available in any result
+        has_snapshots = any(
+            res.get("survival_at_snapshots") is not None
+            for res in survival_results_dict.values()
+        )
+        if has_snapshots:
+            lines.append("#### Snapshot Validation (Cox vs. Observed Retention Rates)")
+            lines.append("")
+            lines.append(
+                "The table below compares Cox model-estimated survival probabilities "
+                "at each snapshot timepoint against the observed binary retention rates. "
+                "Close alignment validates the survival model."
+            )
+            lines.append("")
+            for outcome, res in survival_results_dict.items():
+                snap_df = res.get("survival_at_snapshots")
+                if snap_df is not None and not snap_df.empty:
+                    name = outcome_descriptions.get(outcome, outcome)
+                    lines.append(f"*{name}:*")
+                    lines.append("")
+                    # Convert snapshot df to markdown table
+                    lines.append(
+                        "| Timepoint | Days | Survival (Trained) | Survival (Untrained) | Difference |"
+                    )
+                    lines.append(
+                        "|-----------|------|--------------------|----------------------|------------|"
+                    )
+                    for _, snap_row in snap_df.iterrows():
+                        label   = snap_row.get("timepoint_label", "")
+                        days    = snap_row.get("timepoint_days", "")
+                        s_t     = snap_row.get("survival_treated", float("nan"))
+                        s_c     = snap_row.get("survival_control", float("nan"))
+                        s_diff  = snap_row.get("survival_diff", float("nan"))
+                        s_t_str  = f"{s_t*100:.1f}%"  if pd.notna(s_t)   else "—"
+                        s_c_str  = f"{s_c*100:.1f}%"  if pd.notna(s_c)   else "—"
+                        diff_str = f"{s_diff*100:+.1f}pp" if pd.notna(s_diff) else "—"
+                        lines.append(
+                            f"| {label} | {days} | {s_t_str} | {s_c_str} | {diff_str} |"
+                        )
+                    lines.append("")
+
+        # ── Balance verification ───────────────────────────────────────────
+        lines.append("#### Post-Weighting Balance Verification")
+        all_balanced = True
+        for outcome, res in survival_results_dict.items():
+            bal_df = res.get("balance_df")
+            if bal_df is not None and "balanced_after_weighting" in bal_df.columns:
+                n_imbal = int(bal_df["balanced_after_weighting"].eq(False).sum())
+                if n_imbal > 0:
+                    all_balanced = False
+                    name = outcome_descriptions.get(outcome, outcome)
+                    lines.append(f"- ⚠️ {name}: {n_imbal} imbalanced covariates after weighting")
+        if all_balanced:
+            lines.append(
+                f"- ✅ All {len(survival_results_dict)} survival outcome(s) passed "
+                f"balance verification (0 imbalanced covariates)."
+            )
+            lines.append(
+                "- IPTW successfully balanced observed confounders across treatment groups."
+            )
+        lines.append("")
+
+        # ── E-value table ──────────────────────────────────────────────────
+        if survival_evalues_df is not None and not survival_evalues_df.empty:
+            lines.append("#### E-Value Sensitivity Analysis")
+            lines.append("")
+            lines.append(
+                "> E-values computed on the hazard ratio scale (risk_ratio). "
+                "Larger E-values indicate greater robustness to unmeasured confounding."
+            )
+            lines.append("")
+            lines.append("| Outcome | E-Value Point | E-Value CI | Robustness |")
+            lines.append("|---------|---------------|------------|------------|")
+            for _, row in survival_evalues_df.iterrows():
+                outcome    = row["Outcome"]
+                name       = outcome_descriptions.get(outcome, outcome)
+                ev_pt      = row.get("E_Value_Point")
+                ev_ci      = row.get("E_Value_CI")
+                robustness = row.get("Robustness", "—")
+                sig        = row.get("Significant", False)
+
+                ev_pt_str = f"{ev_pt:.2f}" if pd.notna(ev_pt) else "—"
+                ev_ci_str = f"{ev_ci:.2f}" if pd.notna(ev_ci) else "—"
+
+                if sig:
+                    lines.append(
+                        f"| {name} | **{ev_pt_str}** | **{ev_ci_str}** | {robustness} |"
+                    )
+                else:
+                    lines.append(
+                        f"| {name} | {ev_pt_str} | {ev_ci_str} | {robustness} (ns) |"
+                    )
+            lines.append("")
+
+            # Per-outcome E-value interpretations (significant only)
+            sig_ev = survival_evalues_df[survival_evalues_df.get("Significant", False) == True]
+            if not sig_ev.empty:
+                lines.append("**Significant outcome interpretations:**")
+                lines.append("")
+                for _, row in sig_ev.iterrows():
+                    outcome = row["Outcome"]
+                    name    = outcome_descriptions.get(outcome, outcome)
+                    interp  = row.get("Interpretation", "")
+                    if pd.notna(interp) and interp:
+                        lines.append(f"- **{name}:** {interp}")
+                        lines.append("")
+
+        return "\n".join(lines)
+
+    @staticmethod
     def generate_comparison_table(
         ate_summary: pd.DataFrame,
         att_summary: pd.DataFrame,
@@ -2817,3 +4897,7 @@ class IPTWGEEModel:
         lines.append("")
 
         return "\n".join(lines)
+
+
+# Backward-compatibility alias
+IPTWGEEModel = CausalInferenceModel
