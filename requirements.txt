@@ -1,9 +1,21 @@
+# Core data / numerical
 numpy==1.26.4
 pandas==2.2.2
 scipy==1.13.1
+
+# Statistical modelling
 statsmodels==0.14.2
 scikit-learn==1.5.1
+lifelines>=0.27.0
+econml>=0.15.0
+
+# Visualization
 matplotlib==3.8.4
 seaborn==0.13.2
+
+# Excel export
 openpyxl==3.1.5
-econml>=0.15.0
+
+# Notebook / Jupyter environment
+ipykernel>=6.29.0
+ipywidgets>=8.1.0

@@ -11,10 +11,11 @@ This is a **hands-on workshop** for teaching causal inference methods to I/O psy
 The full pipeline:
 
 ```
-Synthetic data generation → Pre-modeling diagnostics → IPTW + Doubly Robust GEE → DML (optional) → Sensitivity analysis
+Synthetic data generation → Pre-modeling diagnostics → IPTW + Doubly Robust GEE (survey)
+→ IPTW + Piecewise Cox PH (retention/survival) → Sensitivity analysis → DML / HTE exploration (optional)
 ```
 
-**Key teaching points:** IPTW weighting, doubly robust estimation, ATE vs ATT estimands, covariate balance, E-value sensitivity, and heterogeneous treatment effects via Double Machine Learning.
+**Key teaching points:** IPTW weighting, doubly robust estimation, ATE vs ATT estimands, covariate balance, E-value sensitivity, survival analysis via piecewise Cox proportional hazards, and heterogeneous treatment effects via Double Machine Learning.
 
 ---
 
@@ -29,7 +30,7 @@ Synthetic data generation → Pre-modeling diagnostics → IPTW + Doubly Robust 
 │
 ├── supp_functions/
 │   ├── causal_diagnostics.py         # CausalDiagnostics class (2,393 lines)
-│   └── causal_inference_modelling.py # IPTWGEEModel class (2,819 lines)
+│   └── causal_inference_modelling.py # CausalInferenceModel class (5,790 lines)
 │
 ├── data/
 │   ├── s2_manager_data.csv           # Pre-generated dataset (9,000 rows × 25 cols)
@@ -45,10 +46,10 @@ Synthetic data generation → Pre-modeling diagnostics → IPTW + Doubly Robust 
 
 | File | Lines | Role |
 |------|-------|------|
-| `s2_generate_data.py` | ~1,038 | Data generation + Excel reporting |
+| `s2_generate_data.py` | ~1,091 | Data generation + Excel reporting |
 | `causal_diagnostics.py` | ~2,393 | All pre-modeling & balance diagnostics |
-| `causal_inference_modelling.py` | ~2,819 | IPTW/GEE, DML, summary tables, sensitivity, reports |
-| `scenario2_workshop.ipynb` | 34 cells | Interactive walkthrough of the full pipeline |
+| `causal_inference_modelling.py` | ~5,790 | IPTW/GEE, Cox PH survival, DML, summary tables, sensitivity, reports |
+| `scenario2_workshop.ipynb` | 46 cells | Interactive walkthrough of the full pipeline |
 
 ---
 
@@ -86,6 +87,7 @@ See the public [README.md](README.md) for Colab clone + setup instructions.
 | `econml` | ≥0.15.0 | Double Machine Learning (Linear DML, Causal Forest) |
 | `scipy` | 1.13.1 | Statistical tests |
 | `matplotlib` / `seaborn` | 3.8.4 / 0.13.2 | Plotting |
+| `lifelines` | ≥0.27.0 | Survival analysis (Cox PH, Kaplan-Meier) |
 | `openpyxl` | 3.1.5 | Excel export with formatting |
 
 ---
@@ -101,13 +103,13 @@ import sys
 sys.path.append('./supp_functions')
 
 from causal_diagnostics import CausalDiagnostics
-from causal_inference_modelling import IPTWGEEModel
+from causal_inference_modelling import CausalInferenceModel
 
 cd = CausalDiagnostics()
-model = IPTWGEEModel()
+causal_model = CausalInferenceModel()
 ```
 
-> **Note:** There is no package install — imports rely on `sys.path.append`.
+> **Note:** There is no package install — imports rely on `sys.path.append`. The class was renamed from `IPTWGEEModel` to `CausalInferenceModel` to reflect the addition of survival analysis alongside GEE. A backward-compatible alias `IPTWGEEModel = CausalInferenceModel` is provided.
 
 ### `CausalDiagnostics` (causal_diagnostics.py)
 
@@ -128,18 +130,26 @@ Organized into five method groups:
 4. **ATT with Trimming** — heavy extrapolation needed
 5. **Causal Inference Questionable** — insufficient overlap for any estimand
 
-### `IPTWGEEModel` (causal_inference_modelling.py)
+### `CausalInferenceModel` (causal_inference_modelling.py)
 
-Two complementary analysis approaches + reporting utilities:
+Three complementary analysis approaches + reporting utilities:
 
 | Method | Purpose |
 |--------|---------|
-| **`analyze_treatment_effect()`** | Full IPTW + doubly robust GEE pipeline (single entry point) |
+| **`analyze_treatment_effect()`** | Full IPTW + doubly robust GEE pipeline for survey outcomes |
+| **`analyze_survival_effect()`** | Full IPTW + Cox PH / Piecewise Cox pipeline for time-to-event outcomes |
 | **`dml_estimate_treatment_effects()`** | Double Machine Learning via `econml` (Linear DML + Causal Forest) |
-| **`build_summary_table()`** | Consolidates results across outcomes with FDR correction |
-| **`compute_evalues_from_results()`** | E-value sensitivity analysis for unmeasured confounding |
-| **`generate_summary_report()`** | Markdown narrative report with tables, balance verification, E-values |
+| **`prepare_survival_data()`** | Convert departure dates → `days_observed` + `departed` + `departure_quarter` |
+| **`plot_survival_curves()`** | IPTW-weighted Kaplan-Meier curves with risk table + HR annotation |
+| **`build_summary_table()`** | Consolidates GEE results across outcomes with FDR correction |
+| **`build_survival_summary_table()`** | Consolidates survival results (HR, snapshots, optional RMST) |
+| **`compute_evalues_from_results()`** | E-value sensitivity analysis (auto-detects Cohen's d vs risk ratio) |
+| **`compute_rmst_difference()`** | Restricted mean survival time difference with bootstrap CI |
+| **`generate_gee_summary_report()`** | Markdown narrative report for survey (GEE) outcomes |
+| **`generate_survival_summary_report()`** | Markdown narrative report for survival outcomes (HR, RMST, KM) |
 | **`generate_comparison_table()`** | ATE vs ATT side-by-side Markdown comparison |
+
+**Shared IPTW infrastructure:** Both `analyze_treatment_effect()` and `analyze_survival_effect()` delegate data prep, one-hot encoding, column sanitization, propensity score estimation, weight diagnostics, overlap/weight plotting, and balance checking to a shared private method `_prepare_iptw_data()` (~300 lines).
 
 **Internal pipeline of `analyze_treatment_effect()`:**
 1. Data prep → one-hot encode categoricals → clean column names
@@ -150,6 +160,12 @@ Two complementary analysis approaches + reporting utilities:
 6. Doubly robust GEE outcome model (Gaussian or Binomial auto-detected)
 7. Effect size metrics (Cohen's d, % change)
 8. Optional Excel export
+
+**Internal pipeline of `analyze_survival_effect()`:**
+1. Steps 1–5 identical to above (shared via `_prepare_iptw_data()`)
+2. Piecewise Cox PH: fits separate IPTW-weighted Cox models per time interval (e.g., quarterly)
+3. Full-period KM still computed for survival curve plots
+4. Returns per-interval HRs, survival snapshots, and balance diagnostics
 
 ---
 
@@ -197,7 +213,11 @@ Generated by `s2_generate_data.py` with `seed=42`. Key design decisions:
 | `manager_efficacy_index` | Continuous 1–5 | **Outcome** |
 | `workload_index_mgr` | Continuous 1–5 | **Outcome** |
 | `turnover_intention_index_mgr` | Continuous 1–5 | **Outcome** |
-| `retention_Xmonth` | Binary 0/1 | **Outcome** (3, 6, 9, 12 months) |
+| `exit_date` | Date (M/D/YYYY) | Departure date (blank if still employed) |
+| `days_observed` | Integer | Days from study start to departure/censoring (created by `prepare_survival_data()`) |
+| `departed` | Binary 0/1 | Event indicator: 1 = departed, 0 = censored (created by `prepare_survival_data()`) |
+| `departure_quarter` | String | Quarter of departure (created by `prepare_survival_data()`) |
+| `retention_Xmonth` | Binary 0/1 | **Outcome** (3, 6, 9, 12 months) — used for validation, not analysis |
 
 ### Covariate Conventions in Code
 
@@ -215,28 +235,31 @@ continuous_vars = ['age', 'tenure_months', 'num_direct_reports', 'tot_span_of_co
 
 ## 6. Notebook Walkthrough (scenario2_workshop.ipynb)
 
-The notebook has **34 cells** organized into these sections:
+The notebook has **46 cells** (31 code + 15 markdown) organized into these sections:
 
 | Section | Cells | What Happens |
 |---------|-------|-------------|
-| **Setup & Imports** | 1–3 | Install packages, import classes, load data |
-| **Exploratory Data Analysis** | 4–7 | Demographics, treatment rates, crosstabs, distributions |
-| **Pre-Modeling Diagnostics** | 8–10 | VIF check, intercorrelation check, overlap diagnostics |
-| **IPTW + GEE Analysis (ATE)** | 11–13 | `analyze_treatment_effect()` loop over survey + retention outcomes |
-| **Summary & Sensitivity (ATE)** | 14–15 | `build_summary_table()`, `compute_evalues_from_results()`, markdown report |
-| **IPTW + GEE Analysis (ATT)** | 16–19 | Same pipeline with `estimand="ATT"` |
-| **ATE vs ATT Comparison** | 20 | `generate_comparison_table()` |
-| **DML Analysis** | 21–25 | `dml_estimate_treatment_effects()` for survey + retention outcomes |
-| **DML Summary & Sensitivity** | 26–28 | Summary tables and E-values for DML |
-| **Heterogeneous Effects** | 29–34 | CATE estimation, feature importance, tree interpreter |
+| **Setup & Imports** | 1–5 | Imports, class instantiation, load data |
+| **Exploratory Data Analysis** | 6–7 | Demographics, treatment rates, crosstabs, distributions |
+| **Variable Definitions** | 8–9 | Survey outcomes, baselines, covariate lists |
+| **Pre-Modeling Diagnostics** | 10–13 | VIF, intercorrelations, overlap diagnostics, PS density plots, text export |
+| **IPTW + GEE Analysis (ATE)** | 14–16 | `analyze_treatment_effect()` loop over 3 survey outcomes, balance verification |
+| **ATE Sensitivity & Report** | 17–19 | E-values, preserve ATE results, `generate_gee_summary_report()` |
+| **IPTW + GEE Analysis (ATT)** | 20–22 | Same pipeline with `estimand="ATT"`, balance verification, E-values |
+| **ATT Report & Comparison** | 23–24 | `generate_gee_summary_report()`, `generate_comparison_table()` |
+| **Retention: Survival Setup** | 25–26 | Survival variable definitions, `prepare_survival_data()` |
+| **Retention: Piecewise Cox (ATE)** | 27–28 | `analyze_survival_effect(piecewise=True)`, Kaplan-Meier curves |
+| **Retention: Summary & Sensitivity** | 29–33 | Survival summary table, balance verification, E-values, preserve results, `generate_survival_summary_report()` |
+| **Global Summary** | 34–36 | Technical summary table + stakeholder takeaways (markdown) |
+| **DML / HTE Exploration** | 37–38 | `dml_estimate_treatment_effects(estimate="both")` on `manager_efficacy_index` — Linear DML (ATE validation) + Causal Forest (CATE) |
 
 ### Typical Analysis Pattern (Per Outcome Family)
 
 ```python
-# 1. Run analysis for each outcome
+# 1. Run analysis for each survey outcome
 results = {}
-for outcome in outcome_vars:
-    results[outcome] = model.analyze_treatment_effect(
+for outcome in survey_outcomes:
+    results[outcome] = causal_model.analyze_treatment_effect(
         data=data, outcome_var=outcome, treatment_var='treatment',
         categorical_vars=categorical_vars, binary_vars=binary_vars,
         continuous_vars=continuous_vars, cluster_var='team_id',
@@ -244,13 +267,34 @@ for outcome in outcome_vars:
     )
 
 # 2. Build FDR-corrected summary table
-summary = IPTWGEEModel.build_summary_table(results)
+summary = CausalInferenceModel.build_summary_table(results)
 
 # 3. E-value sensitivity analysis
-evalues = IPTWGEEModel.compute_evalues_from_results(results)
+evalues = CausalInferenceModel.compute_evalues_from_results(results)
 
 # 4. Generate markdown report
-report = IPTWGEEModel.generate_summary_report(summary, evalues, results, ...)
+report = CausalInferenceModel.generate_gee_summary_report(summary, evalues, results, ...)
+```
+
+**Survival Analysis Pattern:**
+
+```python
+# 1. Prepare survival data
+data = causal_model.prepare_survival_data(data, 'exit_date', 'treatment', ...)
+
+# 2. Piecewise Cox PH
+survival_results = {}
+survival_results['retention'] = causal_model.analyze_survival_effect(
+    data=data, time_var='days_observed', event_var='departed',
+    treatment_var='treatment', piecewise=True,
+    intervals=[(0,90),(90,180),(180,270),(270,365)], ...
+)
+
+# 3. KM curves + survival summary + E-values
+fig = causal_model.plot_survival_curves(survival_results['retention'], ...)
+summary = CausalInferenceModel.build_survival_summary_table(survival_results)
+evalues = CausalInferenceModel.compute_evalues_from_results(survival_results, effect_type="risk_ratio")
+report = CausalInferenceModel.generate_survival_summary_report(summary, evalues, survival_results, survival_plot_fig=fig)
 ```
 
 ---
@@ -269,13 +313,15 @@ These are the most impactful choices — feedback is especially valuable here:
 
 4. **DML ATT derivation** — ATT from Causal Forest is derived by averaging CATE over treated observations, not a dedicated ATT estimator. *Is this adequately flagged for a teaching audience?*
 
+4b. **Piecewise Cox model** — Retention analysis uses separate Cox models per quarterly interval rather than a single overall model. This reveals when the treatment effect is strongest (first 3 months) but relies on uncorrected multiple tests across periods. *Is the pedagogical benefit worth the additional complexity?*
+
 5. **FDR correction** — Applied across outcomes in `build_summary_table()`, not within individual models. *Correct statistical practice, but is it explained clearly enough?*
 
 6. **E-value computation** — Cohen's d → RR via VanderWeele (2017) formula `RR ≈ exp(0.91 * d)`. Binary outcomes use log-odds. *Are the auto-detection heuristics reliable?*
 
 ### Pedagogical Design
 
-7. **Two-class architecture** — All logic in `CausalDiagnostics` + `IPTWGEEModel`, no package install, `sys.path.append`. *Clean for a workshop? Or should we make it pip-installable?*
+7. **Two-class architecture** — All logic in `CausalDiagnostics` + `CausalInferenceModel`, no package install, `sys.path.append`. *Clean for a workshop? Or should we make it pip-installable?*
 
 8. **Overlap diagnostics depth** — `check_covariate_overlap()` produces extremely detailed output with interpretation guides, ASCII boxes, and tier-based estimand recommendations. *Is the verbosity appropriate for the audience (I/O psych practitioners)?*
 
@@ -287,9 +333,9 @@ These are the most impactful choices — feedback is especially valuable here:
 
 11. **No test suite** — Teaching repo, no unit tests. *Should we add at least smoke tests?*
 
-12. **`generate_summary_report()`** — Auto-generates Markdown narratives with tables, balance checks, E-values, OR interpretation, and trend detection. *Is the auto-generated text accurate and helpful, or could it mislead?*
+12. **`generate_gee_summary_report()` / `generate_survival_summary_report()`** — Auto-generate Markdown narratives with tables, balance checks, E-values, HR interpretation, and trend detection. The survival report can embed inline KM plot images via base64. *Is the auto-generated text accurate and helpful, or could it mislead?*
 
-13. **Excel formatting helpers** — Defined inline in `s2_generate_data.py` (not importable). `IPTWGEEModel` has its own simpler export. *Should these be consolidated?*
+13. **Excel formatting helpers** — Defined inline in `s2_generate_data.py` (not importable). `CausalInferenceModel` has its own simpler export. *Should these be consolidated?*
 
 ---
 
@@ -303,11 +349,12 @@ These are the most impactful choices — feedback is especially valuable here:
 
 ### If You Have 1 Hour
 
-1. Run the notebook end-to-end (all 34 cells execute in ~2-3 minutes)
-2. Review the overlap diagnostics output (cell 7) — is it understandable?
+1. Run the notebook end-to-end (all 46 cells execute in ~2-3 minutes)
+2. Review the overlap diagnostics output — is it understandable?
 3. Compare ATE vs ATT results — does the narrative in the comparison table make sense?
 4. Check E-value interpretations — are the robustness classifications reasonable?
-5. Look at the DML CATE distribution — does heterogeneity match the data generation?
+5. Review the piecewise Cox survival results — does the temporal decay pattern make sense?
+6. Look at the DML CATE distribution (final cell) — does heterogeneity match the data generation?
 
 ### If You Have a Half Day
 
@@ -339,6 +386,9 @@ These are the most impactful choices — feedback is especially valuable here:
 | `correction_method` in `analyze_treatment_effect()` | **Deprecated** — this parameter is ignored. FDR correction now happens in `build_summary_table()` across outcomes. |
 | DML clustering | DML does **not** handle clustering (`team_id`). Standard errors may be anti-conservative. Use IPTW/GEE for cluster-robust inference. |
 | New manager baseline = 0 | `baseline_manager_efficacy` is 0 (not NaN) for new managers. This is intentional — it represents "no prior manager-level data." |
+| Survival analysis date format | `exit_date` uses M/D/YYYY without zero-padding. Pass `date_format='mixed'` to `prepare_survival_data()`. |
+| No ATT for retention | The notebook only runs ATE for survival outcomes. ATT is supported but not demonstrated for retention. |
+| KM confidence bands | IPTW-weighted KM confidence bands are **not valid** for inference (Greenwood variance ignores PS uncertainty). Use Cox HRs for statistical testing. |
 
 ---
 
@@ -372,7 +422,11 @@ The script is deterministic (seed=42). Output should be identical across runs on
 | **FDR** | False Discovery Rate — multiple testing correction applied across outcomes |
 | **ESS** | Effective Sample Size — measures information loss from weighting: ESS = (Σw)² / Σw² |
 | **Positivity** | Assumption that all covariate strata have non-zero probability of treatment |
+| **Cox PH** | Cox Proportional Hazards — semi-parametric survival model: $h(t) = h_0(t) \exp(\beta X)$ |
+| **HR** | Hazard Ratio — the ratio of departure rates; HR < 1 means treatment is protective |
+| **KM** | Kaplan-Meier — non-parametric survival estimator showing retention probability over time |
+| **RMST** | Restricted Mean Survival Time — area under survival curve up to a time horizon (available but unused in notebook) |
 
 ---
 
-*Last updated: 2026-02-27*
+*Last updated: 2026-03-06*

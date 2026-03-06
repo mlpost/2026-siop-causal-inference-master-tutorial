@@ -25,6 +25,7 @@ Date: 2026
 
 import numpy as np
 import pandas as pd
+from datetime import date, timedelta
 from scipy import stats
 from scipy.special import expit  # logistic function
 import warnings
@@ -336,6 +337,58 @@ assert (retention_9mo  <= retention_6mo).all(),  "ERROR: non-monotonic 69 mo!"
 assert (retention_12mo <= retention_9mo).all(),  "ERROR: non-monotonic 912 mo!"
 print("  [OK] Retention monotonicity verified")
 
+# --- exit_date: yyyy-mm-dd for leavers, blank for retained managers ---
+print("\nGenerating exit_date column...")
+
+# Observation window: Jan 2 – Dec 31, 2026  (no one exits on Jan 1)
+YEAR_START = date(2026, 1, 2)
+YEAR_END   = date(2026, 12, 31)
+MAX_DAY    = (YEAR_END - YEAR_START).days  # 363
+
+# Quarter core windows (centre of each exit period)
+QUARTER_RANGES = [
+    (date(2026, 1, 2),  date(2026, 3, 31)),   # Q1: left before 3-month mark
+    (date(2026, 4, 1),  date(2026, 6, 30)),   # Q2: left between 3-6 months
+    (date(2026, 7, 1),  date(2026, 9, 30)),   # Q3: left between 6-9 months
+    (date(2026, 10, 1), date(2026, 12, 31)),  # Q4: left between 9-12 months
+]
+
+# Determine which quarter each leaver falls into
+# retention_3month==0                              → exited Q1
+# retention_3month==1 & retention_6month==0         → exited Q2
+# retention_6month==1 & retention_9month==0         → exited Q3
+# retention_9month==1 & retention_12month==0        → exited Q4
+# retention_12month==1                              → still employed (blank)
+exit_quarter = np.full(N_TOTAL, -1, dtype=int)  # -1 = retained
+exit_quarter[retention_3mo == 0] = 0
+exit_quarter[(retention_3mo == 1) & (retention_6mo == 0)] = 1
+exit_quarter[(retention_6mo == 1) & (retention_9mo == 0)] = 2
+exit_quarter[(retention_9mo == 1) & (retention_12mo == 0)] = 3
+
+exit_dates = np.full(N_TOTAL, '', dtype=object)
+for q_idx, (q_start, q_end) in enumerate(QUARTER_RANGES):
+    mask = exit_quarter == q_idx
+    n_leavers = mask.sum()
+    if n_leavers == 0:
+        continue
+    # Draw a uniform base day within the quarter, then add Gaussian jitter
+    # (sd ~10 days) so dates bleed slightly across quarter edges for realism
+    span_days = (q_end - q_start).days + 1
+    base_offsets = np.random.uniform(0, span_days, size=n_leavers)
+    jitter = np.random.normal(0, 10, size=n_leavers)
+    # Convert to absolute days from YEAR_START; reflect at boundaries
+    # to avoid pile-up at Jan 2 / Dec 31
+    abs_days = (q_start - YEAR_START).days + base_offsets + jitter
+    abs_days = np.where(abs_days < 0, -abs_days, abs_days)
+    abs_days = np.where(abs_days > MAX_DAY, 2 * MAX_DAY - abs_days, abs_days)
+    abs_days = np.clip(abs_days, 0, MAX_DAY).astype(int)  # safety
+    exit_dates[mask] = [(YEAR_START + timedelta(days=int(d))).strftime('%Y-%m-%d')
+                        for d in abs_days]
+
+n_leavers_total = (exit_quarter >= 0).sum()
+n_retained = (exit_quarter == -1).sum()
+print(f"  [OK] exit_date generated: {n_leavers_total} leavers, {n_retained} retained (blank)")
+
 # ============================================================================
 # SECTION 8: ASSEMBLE MANAGER DATAFRAME
 # ============================================================================
@@ -399,6 +452,7 @@ df_managers = pd.DataFrame({
     'retention_6month': retention_6mo,
     'retention_9month': retention_9mo,
     'retention_12month': retention_12mo,
+    'exit_date': exit_dates,
     'manager_efficacy_index': manager_efficacy,
     'workload_index_mgr': workload_manager,
     'turnover_intention_index_mgr': turnover_intention_manager,
