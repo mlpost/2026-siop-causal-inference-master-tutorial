@@ -13,7 +13,7 @@ This is a **workshop/tutorial codebase** for teaching causal inference methods a
 | `s2_generate_data.py` | Deterministic synthetic data generator (seed=42). Produces manager-level CSV + Excel descriptives. Run standalone to regenerate `data/`. |
 | `scenario2_workshop.ipynb` | Main teaching notebook. Walks through the full causal inference pipeline interactively. |
 | `supp_functions/causal_diagnostics.py` | `CausalDiagnostics` class — pre-modeling checks (VIF, intercorrelations, overlap), covariate balance (SMD), propensity score visualization. |
-| `supp_functions/causal_inference_modelling.py` | `CausalInferenceModel` class — three approaches: (1) IPTW + doubly robust GEE for continuous/binary outcomes, (2) IPTW + Piecewise Cox PH for time-to-event survival outcomes via `lifelines`, (3) Double Machine Learning (DML) via `econml` for ATE/ATT/CATE estimation. Also includes E-value sensitivity, RMST, Markdown report generation, and summary tables. Shared IPTW infrastructure is factored into `_prepare_iptw_data()`. |
+| `supp_functions/causal_inference_modelling.py` | `CausalInferenceModel` class (aliased as `IPTWGEEModel` for backward compatibility) — three approaches: (1) IPTW + doubly robust GEE for continuous/binary outcomes, (2) IPTW + Cox PH with time interaction for time-to-event survival outcomes via `lifelines`, (3) Double Machine Learning (DML) via `econml` for ATE/ATT/CATE estimation. Also includes E-value sensitivity, RMST, Markdown report generation, and summary tables. Shared IPTW infrastructure is factored into `_prepare_iptw_data()`. Module has a comprehensive docstring cataloguing all public methods by category. |
 | `data/s2_manager_data.csv` | Pre-generated manager-level dataset (9000 rows). |
 | `pregenereated_results/s2/` | Reference diagnostic outputs for comparison. |
 | `results/` | Output directory for workshop-generated results (Excel, plots). |
@@ -47,16 +47,19 @@ Both ATE and ATT are run for survey outcomes; results are compared via `CausalIn
 
 **Retention (time-to-event):** single survival outcome keyed as `'retention'` — ATE only (no ATT for retention)
 1. **Data prep** — `causal_model.prepare_survival_data()` converts `exit_date` → `days_observed` + `departed`
-2. **IPTW + Piecewise Cox PH** — `causal_model.analyze_survival_effect(piecewise=True, intervals=[(0,90),(90,180),(180,270),(270,365)])` fits separate HRs per quarterly interval
+2. **IPTW + Cox Time Interaction** — `causal_model.analyze_survival_effect(time_interaction='categorical', period_breaks=[0, 90, 180, 270, 365], period_labels=['0-3mo', '3-6mo', '6-9mo', '9-12mo'])` fits separate HRs per quarterly interval
 3. **Kaplan-Meier** — `causal_model.plot_survival_curves()` with snapshot overlays and risk table
 4. **Summary** — `CausalInferenceModel.build_survival_summary_table()` (optionally includes RMST columns)
-5. **Sensitivity** — `CausalInferenceModel.compute_evalues_from_results(results_dict, effect_type="risk_ratio")`
-6. **Report** — `CausalInferenceModel.generate_survival_summary_report(survival_plot_fig=fig)` renders Markdown technical summary with optional inline KM figure
+5. **Balance verification** — reuses `verify_balance()` (defined in survey section), excluding time/event columns
+6. **Sensitivity** — `CausalInferenceModel.compute_evalues_from_results(survival_results, effect_type="risk_ratio")`
+7. **Preserve** — results saved as `ate_survival_results`, `ate_survival_summary`, `ate_survival_evalues`
+8. **Report** — `CausalInferenceModel.generate_survival_summary_report(survival_plot_fig=survival_fig)` renders Markdown technical summary with optional inline KM figure
 
 Note: `CausalInferenceModel.compute_rmst_difference()` is available for business-friendly "additional days retained" but is not called in the current notebook pipeline.
 
 **HTE exploration (optional):**
-- `causal_model.dml_estimate_treatment_effects(estimate="both")` — runs both Linear DML (ATE validation) and Causal Forest DML (CATE exploration) on significant survey outcomes (currently only `manager_efficacy_index`)
+- `causal_model.dml_estimate_treatment_effects(estimand="ATE", estimate="both")` — runs both Linear DML (ATE validation) and Causal Forest DML (CATE exploration) on significant survey outcomes (currently only `manager_efficacy_index`)
+- Baseline variable for the outcome (e.g., `baseline_manager_efficacy`) is appended to `continuous_vars` for HTE estimation
 
 ### `CausalDiagnostics` method groups
 The class is organized into five groups. Key signatures:
@@ -104,8 +107,7 @@ Key building-block methods (also usable standalone):
 - `calculate_standardized_mean_difference()` — **deprecated**, prefer `CausalDiagnostics.compute_balance_df()`
 
 Cox PH internals:
-- `_fit_cox_model()` — fits IPTW-weighted Cox PH with optional auto-stratification (PH testing → re-fit) or manual strata
-- `_fit_piecewise_cox()` — fits separate Cox models per time interval (e.g., quarterly)
+- `_fit_cox_model()` — fits IPTW-weighted Cox PH with time interaction; supports `time_interaction="categorical"` (person-period expansion with separate HRs per interval, e.g., quarterly) or `time_interaction="continuous"` (linear trend). Requires `period_breaks` and optional `period_labels` for categorical mode. There is no separate `_fit_piecewise_cox()` method — piecewise estimation is handled within `_fit_cox_model`.
 
 ### Column name sanitization
 `CausalInferenceModel._clean_column_name()` replaces special characters (e.g., `&` → `and`, spaces → `_`) for statsmodels formula compatibility. All variable references are remapped after one-hot encoding. When adding new variables, avoid characters that break patsy formulas.
@@ -121,8 +123,8 @@ Both ATE and ATT are supported across both analysis approaches:
 ### Survival analysis conventions
 - `prepare_survival_data()` converts a departure date column to `days_observed` (int) + `departed` (0/1) + `departure_quarter` (str)
 - `analyze_survival_effect()` uses the same IPTW weighting infrastructure (`_prepare_iptw_data()`) as `analyze_treatment_effect()` but fits a Cox PH model instead of GEE
-- **Piecewise Cox** — `analyze_survival_effect(piecewise=True, intervals=[(0,90),(90,180),(180,270),(270,365)])` fits separate hazard ratios per time interval, preferred in the notebook over a single global Cox model
-- `strata='auto'` enables automatic stratification on categorical variables that violate the proportional hazards assumption (available but not used in the current notebook — piecewise is used instead)
+- **Time interaction Cox** — `analyze_survival_effect(time_interaction='categorical', period_breaks=[0, 90, 180, 270, 365], period_labels=['0-3mo', '3-6mo', '6-9mo', '9-12mo'])` fits separate hazard ratios per time interval via person-period expansion, preferred in the notebook over a single global Cox model
+- `time_interaction='continuous'` is also available (models treatment × time as a linear trend) but not used in the current notebook
 - `compute_rmst_difference()` provides a business-friendly metric: additional days retained within the study window (available but not called in the current notebook pipeline)
 - `build_survival_summary_table()` is the survival analogue of `build_summary_table()` and optionally includes RMST columns
 - `generate_survival_summary_report()` accepts an optional `survival_plot_fig` parameter for embedding the KM figure as an inline base64 image in the Markdown report
@@ -179,7 +181,13 @@ These helpers are defined inline in `s2_generate_data.py` (not importable). When
 
 ## Notebook structure summary
 
-The notebook ends with two substantial markdown cells:
+The descriptive exploration cell (cell 8) includes:
+- Demographic comparisons (continuous KDEs, categorical bar charts)
+- Team size / new manager status plots
+- **Retention over time line plot** — daily retention % by treatment group (Control vs. Treated) computed from `exit_date`
+
+The notebook ends with three substantial markdown cells:
+- **DML / HTE Learning Guide** — detailed explanation of Linear DML, Causal Forest, and CATE methodology
 - **Global Technical Summary** — table consolidating all results across outcome families
 - **Key Takeaways for Stakeholders** — plain-language recommendations for HR decision-makers
 

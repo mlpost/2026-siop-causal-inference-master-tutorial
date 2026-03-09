@@ -12,10 +12,10 @@ The full pipeline:
 
 ```
 Synthetic data generation → Pre-modeling diagnostics → IPTW + Doubly Robust GEE (survey)
-→ IPTW + Piecewise Cox PH (retention/survival) → Sensitivity analysis → DML / HTE exploration (optional)
+→ IPTW + Cox PH with Time Interaction (retention/survival) → Sensitivity analysis → DML / HTE exploration (optional)
 ```
 
-**Key teaching points:** IPTW weighting, doubly robust estimation, ATE vs ATT estimands, covariate balance, E-value sensitivity, survival analysis via piecewise Cox proportional hazards, and heterogeneous treatment effects via Double Machine Learning.
+**Key teaching points:** IPTW weighting, doubly robust estimation, ATE vs ATT estimands, covariate balance, E-value sensitivity, survival analysis via Cox PH with time interaction (quarterly hazard ratios), and heterogeneous treatment effects via Double Machine Learning.
 
 ---
 
@@ -48,8 +48,8 @@ Synthetic data generation → Pre-modeling diagnostics → IPTW + Doubly Robust 
 |------|-------|------|
 | `s2_generate_data.py` | ~1,091 | Data generation + Excel reporting |
 | `causal_diagnostics.py` | ~2,393 | All pre-modeling & balance diagnostics |
-| `causal_inference_modelling.py` | ~5,790 | IPTW/GEE, Cox PH survival, DML, summary tables, sensitivity, reports |
-| `scenario2_workshop.ipynb` | 46 cells | Interactive walkthrough of the full pipeline |
+| `causal_inference_modelling.py` | ~5,388 | IPTW/GEE, Cox PH survival, DML, summary tables, sensitivity, reports |
+| `scenario2_workshop.ipynb` | 47 cells | Interactive walkthrough of the full pipeline |
 
 ---
 
@@ -137,7 +137,7 @@ Three complementary analysis approaches + reporting utilities:
 | Method | Purpose |
 |--------|---------|
 | **`analyze_treatment_effect()`** | Full IPTW + doubly robust GEE pipeline for survey outcomes |
-| **`analyze_survival_effect()`** | Full IPTW + Cox PH / Piecewise Cox pipeline for time-to-event outcomes |
+| **`analyze_survival_effect()`** | Full IPTW + Cox PH pipeline with time interaction for time-to-event outcomes |
 | **`dml_estimate_treatment_effects()`** | Double Machine Learning via `econml` (Linear DML + Causal Forest) |
 | **`prepare_survival_data()`** | Convert departure dates → `days_observed` + `departed` + `departure_quarter` |
 | **`plot_survival_curves()`** | IPTW-weighted Kaplan-Meier curves with risk table + HR annotation |
@@ -163,7 +163,7 @@ Three complementary analysis approaches + reporting utilities:
 
 **Internal pipeline of `analyze_survival_effect()`:**
 1. Steps 1–5 identical to above (shared via `_prepare_iptw_data()`)
-2. Piecewise Cox PH: fits separate IPTW-weighted Cox models per time interval (e.g., quarterly)
+2. Cox PH with time interaction via `_fit_cox_model()`: `time_interaction="categorical"` expands data to person-period format and fits separate HRs per interval (e.g., quarterly); `time_interaction="continuous"` models treatment × time as a linear trend
 3. Full-period KM still computed for survival curve plots
 4. Returns per-interval HRs, survival snapshots, and balance diagnostics
 
@@ -235,23 +235,22 @@ continuous_vars = ['age', 'tenure_months', 'num_direct_reports', 'tot_span_of_co
 
 ## 6. Notebook Walkthrough (scenario2_workshop.ipynb)
 
-The notebook has **46 cells** (31 code + 15 markdown) organized into these sections:
+The notebook has **47 cells** (32 code + 15 markdown) organized into these sections:
 
 | Section | Cells | What Happens |
 |---------|-------|-------------|
-| **Setup & Imports** | 1–5 | Imports, class instantiation, load data |
-| **Exploratory Data Analysis** | 6–7 | Demographics, treatment rates, crosstabs, distributions |
-| **Variable Definitions** | 8–9 | Survey outcomes, baselines, covariate lists |
-| **Pre-Modeling Diagnostics** | 10–13 | VIF, intercorrelations, overlap diagnostics, PS density plots, text export |
-| **IPTW + GEE Analysis (ATE)** | 14–16 | `analyze_treatment_effect()` loop over 3 survey outcomes, balance verification |
-| **ATE Sensitivity & Report** | 17–19 | E-values, preserve ATE results, `generate_gee_summary_report()` |
-| **IPTW + GEE Analysis (ATT)** | 20–22 | Same pipeline with `estimand="ATT"`, balance verification, E-values |
-| **ATT Report & Comparison** | 23–24 | `generate_gee_summary_report()`, `generate_comparison_table()` |
-| **Retention: Survival Setup** | 25–26 | Survival variable definitions, `prepare_survival_data()` |
-| **Retention: Piecewise Cox (ATE)** | 27–28 | `analyze_survival_effect(piecewise=True)`, Kaplan-Meier curves |
-| **Retention: Summary & Sensitivity** | 29–33 | Survival summary table, balance verification, E-values, preserve results, `generate_survival_summary_report()` |
-| **Global Summary** | 34–36 | Technical summary table + stakeholder takeaways (markdown) |
-| **DML / HTE Exploration** | 37–38 | `dml_estimate_treatment_effects(estimate="both")` on `manager_efficacy_index` — Linear DML (ATE validation) + Causal Forest (CATE) |
+| **Intro & Setup** | 1–7 | Markdown overview, imports, class instantiation, load data, data overview |
+| **Exploratory Data Analysis** | 8 | Demographics, treatment rates, crosstabs, distributions, retention over time line plot |
+| **Pre-Modeling Diagnostics** | 9–14 | Overlap diagnostics, VIF, intercorrelations |
+| **IPTW + GEE Analysis (ATE)** | 15–19 | Markdown explanation, `analyze_treatment_effect()` loop over 3 survey outcomes, balance verification |
+| **ATE Sensitivity & Report** | 20–26 | E-values, preserve ATE results, outcome descriptions, `generate_gee_summary_report()` |
+| **IPTW + GEE Analysis (ATT)** | 27–30 | Markdown explanation, same pipeline with `estimand="ATT"`, balance verification, E-values |
+| **ATT Report & Comparison** | 30–31 | `generate_gee_summary_report()`, `generate_comparison_table()` |
+| **Retention: Survival Setup** | 32–35 | Markdown explanation, survival variable definitions, `prepare_survival_data()` |
+| **Retention: Cox Time Interaction (ATE)** | 36–37 | `analyze_survival_effect(time_interaction='categorical')`, Kaplan-Meier curves |
+| **Retention: Summary & Sensitivity** | 38–43 | Reimport, survival summary table, balance verification, E-values, preserve results, `generate_survival_summary_report()` |
+| **Global Summary & Takeaways** | 44–45 | Technical summary table + stakeholder takeaways (markdown) |
+| **DML / HTE Exploration** | 46–47 | DML learning guide (markdown) + `dml_estimate_treatment_effects(estimand="ATE", estimate="both")` on `manager_efficacy_index` |
 
 ### Typical Analysis Pattern (Per Outcome Family)
 
@@ -282,12 +281,14 @@ report = CausalInferenceModel.generate_gee_summary_report(summary, evalues, resu
 # 1. Prepare survival data
 data = causal_model.prepare_survival_data(data, 'exit_date', 'treatment', ...)
 
-# 2. Piecewise Cox PH
+# 2. Cox PH with time interaction
 survival_results = {}
 survival_results['retention'] = causal_model.analyze_survival_effect(
     data=data, time_var='days_observed', event_var='departed',
-    treatment_var='treatment', piecewise=True,
-    intervals=[(0,90),(90,180),(180,270),(270,365)], ...
+    treatment_var='treatment',
+    time_interaction='categorical',
+    period_breaks=[0, 90, 180, 270, 365],
+    period_labels=['0-3mo', '3-6mo', '6-9mo', '9-12mo'], ...
 )
 
 # 3. KM curves + survival summary + E-values
@@ -313,7 +314,7 @@ These are the most impactful choices — feedback is especially valuable here:
 
 4. **DML ATT derivation** — ATT from Causal Forest is derived by averaging CATE over treated observations, not a dedicated ATT estimator. *Is this adequately flagged for a teaching audience?*
 
-4b. **Piecewise Cox model** — Retention analysis uses separate Cox models per quarterly interval rather than a single overall model. This reveals when the treatment effect is strongest (first 3 months) but relies on uncorrected multiple tests across periods. *Is the pedagogical benefit worth the additional complexity?*
+4b. **Cox time interaction model** — Retention analysis fits a single Cox model with treatment × time-period interaction terms (person-period expansion) rather than separate models per interval. This reveals when the treatment effect is strongest (first 3 months) but relies on uncorrected multiple tests across periods. *Is the pedagogical benefit worth the additional complexity?*
 
 5. **FDR correction** — Applied across outcomes in `build_summary_table()`, not within individual models. *Correct statistical practice, but is it explained clearly enough?*
 
@@ -349,11 +350,11 @@ These are the most impactful choices — feedback is especially valuable here:
 
 ### If You Have 1 Hour
 
-1. Run the notebook end-to-end (all 46 cells execute in ~2-3 minutes)
+1. Run the notebook end-to-end (all 47 cells execute in ~2-3 minutes)
 2. Review the overlap diagnostics output — is it understandable?
 3. Compare ATE vs ATT results — does the narrative in the comparison table make sense?
 4. Check E-value interpretations — are the robustness classifications reasonable?
-5. Review the piecewise Cox survival results — does the temporal decay pattern make sense?
+5. Review the Cox time interaction survival results — does the temporal decay pattern make sense?
 6. Look at the DML CATE distribution (final cell) — does heterogeneity match the data generation?
 
 ### If You Have a Half Day
@@ -429,4 +430,4 @@ The script is deterministic (seed=42). Output should be identical across runs on
 
 ---
 
-*Last updated: 2026-03-06*
+*Last updated: 2026-03-09*
