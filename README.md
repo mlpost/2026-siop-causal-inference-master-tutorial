@@ -25,33 +25,15 @@ This course walks through a real-world people analytics use case: **evaluating w
 
 ---
 
-## Getting Started with Google Colab
+## Get Started in Google Colab
 
 No local installation required. Everything runs in your browser.
-
-### Step 1: Open the Main Notebook in Colab
 
 <a href="https://colab.research.google.com/github/mlpost/2026-siop-causal-inference-master-tutorial/blob/main/scenario2_workshop.ipynb" target="_blank" rel="noopener noreferrer">
   <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
 </a>
 
-### Step 2: Clone the Repo
 
-Uncomment and run the very first cell in the notebook. This is crucial to: 
-- ensure you get access to the data and supplementary py files
-- install required libraries
-
-```python
-# Clone the repo
-import os
-if not os.path.exists('2026-siop-causal-inference-master-tutorial'):
-  !git clone https://github.com/mlpost/2026-siop-causal-inference-master-tutorial.git
-
-!pip install -q -r 2026-siop-causal-inference-master-tutorial/requirements.txt
-
-# Add source code to path
-import sys
-sys.path.insert(0, '2026-siop-causal-inference-master-tutorial')
 
 # If needed: delete the repo
 # !rm -rf 2026-siop-causal-inference-master-tutorial
