@@ -29,13 +29,15 @@ This course walks through a real-world people analytics use case: **evaluating w
 
 No local installation required. Everything runs in your browser.
 
-### Step 1: Navigate to Google Colab
+### Step 1: Open the Main Notebook in Colab
 
-https://colab.research.google.com/
+[![Click Here to Open in Colab!](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mlpost/2026-siop-causal-inference-master-tutorial/blob/main/scenario2_workshop.ipynb)
 
-### Step 2: Clone this Repo
+### Step 2: Clone the Repo
 
-Open a notebook and run this cell: <br>
+Uncomment and run the very first cell in the notebook. This is crucial to: 
+- ensure you get access to the data and supplementary py files
+- install required libraries
 
 ```python
 # Clone the repo
