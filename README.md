@@ -31,7 +31,7 @@ No local installation required. Everything runs in your browser.
 
 ### Step 1: Open the Main Notebook in Colab
 
-<a href="https://colab.research.google.com/github/mlpost/2026-siop-causal-inference-master-tutorial/blob/main/scenario2_workshop.ipynb" target="_blank">
+<a href="https://colab.research.google.com/github/mlpost/2026-siop-causal-inference-master-tutorial/blob/main/scenario2_workshop.ipynb" target="_blank" rel="noopener noreferrer">
   <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
 </a>
 
