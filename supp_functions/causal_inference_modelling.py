@@ -1,4 +1,14 @@
 """
+⚠️  DEVELOPMENT CODE DISCLAIMER ⚠️
+
+This code is provided for educational purposes as part of a causal inference
+tutorial for I/O psychologists. While developed in good faith and based on
+established statistical methods, this is ACTIVE DEVELOPMENT CODE that:
+
+• May contain bugs or unvalidated edge cases
+• Has not undergone formal validation for production use
+• Should be used with appropriate statistical supervision
+
 Causal Inference Modeling Module
 ================================
 
@@ -96,7 +106,7 @@ Notes
 - GEE/Cox sandwich standard errors do **not** propagate first-stage uncertainty
   from propensity score estimation.
 """
-
+import atexit
 import re
 import warnings
 
@@ -129,6 +139,27 @@ except ImportError:
     display = print
 
 from causal_diagnostics import CausalDiagnostics
+
+# Global flag to track if disclaimer has been shown
+_DISCLAIMER_SHOWN = False
+
+def _show_development_disclaimer():
+    """Display development code disclaimer once per session."""
+    global _DISCLAIMER_SHOWN
+    if not _DISCLAIMER_SHOWN:
+        print("\n" + "="*80)
+        print("🚨 CAUSAL INFERENCE TUTORIAL - DEVELOPMENT CODE DISCLAIMER 🚨")
+        print("="*80)
+        print("This code is provided for EDUCATIONAL PURPOSES ONLY as part of")
+        print("a causal inference tutorial for I/O psychologists.")
+        print()
+        print("⚠️  IMPORTANT LIMITATIONS:")
+        print("   • Active development code - may contain bugs")
+        print("   • Not validated for production research use")
+        print("   • Requires statistical supervision and verification")
+        print("="*80)
+        print()
+        _DISCLAIMER_SHOWN = True
 
 
 class CausalInferenceModel:
@@ -187,6 +218,7 @@ class CausalInferenceModel:
         capture results per iteration from the returned dict rather than
         relying on these instance attributes.
         """
+        _show_development_disclaimer()
         self.weight_col = "iptw"
         self.ps_model = None
         self.gee_model = None
@@ -2061,7 +2093,6 @@ class CausalInferenceModel:
         project_path: Optional[str] = None,
         trim_quantile: float = 0.99,
         analysis_name: Optional[str] = None,
-        correction_method: str = 'fdr_bh',
         alpha: float = 0.05,
         plot_propensity: bool = True,
         plot_weights: bool = True
@@ -2077,6 +2108,11 @@ class CausalInferenceModel:
         5. Doubly robust outcome modeling via weighted GEE
         6. Effect size metrics (Cohen's d, percent change)
         7. Optional export to Excel workbook
+
+        **IMPORTANT: Multiple Testing Correction**
+        This function returns RAW p-values without any correction. When analyzing
+        multiple outcomes, use ``build_summary_table()`` which applies FDR correction
+        across all outcomes simultaneously — the statistically correct approach.
         
         Parameters
         ----------
@@ -2105,14 +2141,9 @@ class CausalInferenceModel:
             Quantile for weight trimming
         analysis_name : str, optional
             Analysis identifier for file naming
-        correction_method : str, default='fdr_bh'
-            **Deprecated.** No longer used within this method. Multiple testing
-            correction is now applied across outcomes in
-            ``build_summary_table()``. Kept for backward-compatible call
-            signatures.
         alpha : float, default=0.05
             Significance level used for confidence intervals and raw p-value
-            significance threshold
+            significance threshold (before any multiple testing correction)
         plot_propensity : bool, default=True
             If True, generates propensity score overlap density plot
         plot_weights : bool, default=True
@@ -2126,29 +2157,30 @@ class CausalInferenceModel:
             - estimand: String indicating "ATE" or "ATT"
             - ci_lower: Lower confidence interval bound (at 1-alpha level)
             - ci_upper: Upper confidence interval bound (at 1-alpha level)
-            - p_value: Raw p-value for the treatment effect
-            - significant: Boolean indicating significance at alpha (raw)
+            - p_value: RAW p-value for the treatment effect (uncorrected)
+            - significant: Boolean indicating significance at alpha (raw, uncorrected)
             - alpha: Significance level used
             - cohens_d: Cohen's d effect size (uses raw weighted mean diff)
             - pct_change: Percent change relative to control group mean
             - mean_treatment: Weighted mean outcome for treated group
             - mean_control: Weighted mean outcome for control group
             - coefficients_df: DataFrame with treatment effect row only,
-              containing Estimate, Std_Error, CI_Lower, CI_Upper,
-              P_Value_Raw
+            containing Estimate, Std_Error, CI_Lower, CI_Upper,
+            P_Value_Raw
             - full_coefficients_df: DataFrame with all model coefficients
-              (intercept, treatment, covariates) in the same format as
-              coefficients_df. Used in the Excel sheet export.
+            (intercept, treatment, covariates) in the same format as
+            coefficients_df. Used in the Excel sheet export.
             - gee_results: Full fitted GEE model object
             - ps_model: Fitted propensity score model object
             - ps_summary_df: DataFrame of propensity score model coefficients
             - balance_df: DataFrame of pre- and post-weighting balance statistics
-              (computed via CausalDiagnostics.compute_balance_df)
+            (computed via CausalDiagnostics.compute_balance_df)
             - weight_diagnostics: Dictionary of weight summary statistics
             - ps_overlap_fig: Propensity score overlap figure (if plot_propensity=True)
             - weight_dist_fig: Weight distribution figure (if plot_weights=True)
             - weighted_df: Processed DataFrame with propensity_score and iptw
-              columns attached (useful for independent balance verification)
+            columns attached (useful for independent balance verification)
+            - outcome_type: "binary" or "continuous" based on auto-detection
         
         Raises
         ------
@@ -2159,17 +2191,11 @@ class CausalInferenceModel:
         estimand = estimand.upper()
         if estimand not in ["ATE", "ATT"]:
             raise ValueError(f"estimand must be 'ATE' or 'ATT', got '{estimand}'")
-        
-        # --- R5: Emit deprecation warning for correction_method if supplied ---
-        if correction_method != 'fdr_bh':
-            warnings.warn(
-                "The 'correction_method' parameter in analyze_treatment_effect() is "
-                "deprecated and ignored. Multiple-testing correction is now applied "
-                "across outcomes in build_summary_table().",
-                DeprecationWarning,
-                stacklevel=2
-            )
-        
+
+        # --- Remind users about multiple testing correction ---
+        print(f"\n📊 Analyzing outcome: {outcome_var}")
+        print("⚠️  REMINDER: This returns raw p-values. For multiple outcomes, use build_summary_table() for FDR correction.")
+
         # ------------------------------------------------------------------
         # Steps 0–2: Data prep, propensity weighting, diagnostics
         # (delegated to shared helper — see _prepare_iptw_data)
@@ -2189,22 +2215,22 @@ class CausalInferenceModel:
             baseline_var=baseline_var,
             analysis_label=f"{outcome_var} ({estimand})",
         )
-        df             = _iptw["df"]
-        ps_model       = _iptw["ps_model"]
-        weight_stats   = _iptw["weight_stats"]
-        balance_df     = _iptw["balance_df"]
-        ps_overlap_fig = _iptw["ps_overlap_fig"]
+        df              = _iptw["df"]
+        ps_model        = _iptw["ps_model"]
+        weight_stats    = _iptw["weight_stats"]
+        balance_df      = _iptw["balance_df"]
+        ps_overlap_fig  = _iptw["ps_overlap_fig"]
         weight_dist_fig = _iptw["weight_dist_fig"]
-        covariates     = _iptw["covariates"]
-        outcome_var    = _iptw["outcome_var"]
-        treatment_var  = _iptw["treatment_var"]
-        cluster_var    = _iptw["cluster_var"]
-        baseline_var   = _iptw["baseline_var"]
+        covariates      = _iptw["covariates"]
+        outcome_var     = _iptw["outcome_var"]
+        treatment_var   = _iptw["treatment_var"]
+        cluster_var     = _iptw["cluster_var"]
+        baseline_var    = _iptw["baseline_var"]
 
         # ------------------------------------------------------------------
         # Step 3: Fit doubly robust outcome model
         # ------------------------------------------------------------------
-        # B10: Auto-detect binary outcomes for appropriate GEE family
+        # Auto-detect binary outcomes for appropriate GEE family
         outcome_values = df[outcome_var].dropna().unique()
         is_binary_outcome = set(outcome_values).issubset({0, 1, 0.0, 1.0})
         auto_family = "binomial" if is_binary_outcome else "gaussian"
@@ -2238,8 +2264,8 @@ class CausalInferenceModel:
         p_value_raw = gee_res.pvalues[treatment_var]
         
         # --- Effect size metrics ---
-        # B3 fix: Cohen's d uses the raw weighted mean difference (not the
-        # conditional GEE coefficient) divided by the weighted marginal pooled SD.
+        # Cohen's d uses the raw weighted mean difference (not the conditional
+        # GEE coefficient) divided by the weighted marginal pooled SD.
         treated_df = df[df[treatment_var] == 1]
         control_df = df[df[treatment_var] == 0]
         
@@ -2256,12 +2282,13 @@ class CausalInferenceModel:
         )
         pooled_sd = np.sqrt((var_treated + var_control) / 2)
         cohens_d = raw_diff / pooled_sd if pooled_sd > 0 else 0
-        # S2 fix: pct_change uses the same marginal raw_diff as cohens_d
-        # (not the conditional GEE coefficient 'effect') for consistency.
+
+        # pct_change uses the same marginal raw_diff as cohens_d
+        # (not the conditional GEE coefficient) for consistency.
         pct_change = (raw_diff / mean_control) * 100 if abs(mean_control) > 1e-9 else None
         
-        # --- B2 fix: No within-model multiple testing correction.            ---
-        # --- Correction is applied across outcomes in build_summary_table ---
+        # No within-model multiple testing correction.
+        # Correction is applied across outcomes in build_summary_table().
         significant = p_value_raw < alpha
         stars = self._significance_stars(p_value_raw)
         
@@ -2278,7 +2305,9 @@ class CausalInferenceModel:
         })
         
         # --- Build coefficients DataFrame (treatment row only, for printed summary) ---
-        coefficients_df = full_coefficients_df[full_coefficients_df['Parameter'] == treatment_var].copy()
+        coefficients_df = full_coefficients_df[
+            full_coefficients_df['Parameter'] == treatment_var
+        ].copy()
         
         # --- Print summary ---
         ci_pct = int((1 - alpha) * 100)
@@ -2334,7 +2363,7 @@ class CausalInferenceModel:
             "weight_diagnostics": weight_stats,
             "ps_overlap_fig": ps_overlap_fig,
             "weight_dist_fig": weight_dist_fig,
-            "weighted_df": df,  # processed DataFrame with propensity_score & iptw columns
+            "weighted_df": df,
             "outcome_type": "binary" if is_binary_outcome else "continuous",
         }
 
@@ -3455,7 +3484,6 @@ class CausalInferenceModel:
     # ==================================================================
     # Sensitivity analysis
     # ==================================================================
-
     @staticmethod
     def compute_evalue(
         effect: float,
@@ -3629,7 +3657,7 @@ class CausalInferenceModel:
     @staticmethod
     def compute_evalues_from_results(
         results_dict: Dict[str, Dict],
-        effect_type: str = "auto",
+        effect_type: str = "cohens_d",
         outcome_rare: bool = False
     ) -> pd.DataFrame:
         """
@@ -3645,10 +3673,12 @@ class CausalInferenceModel:
         results_dict : Dict[str, Dict]
             Dictionary keyed by outcome name, where each value is the dict
             returned by analyze_treatment_effect().
-        effect_type : str, default="auto"
-            Effect type for E-value computation. If "auto", infers from the
-            outcome: uses "cohens_d" for continuous outcomes (Cohen's d available)
-            and "log_odds" for binary outcomes.
+        effect_type : str, default="cohens_d"
+            Effect type for E-value computation. Must be one of:
+            - "cohens_d": For continuous outcomes (uses Cohen's d)
+            - "log_odds": For binary outcomes (uses log odds ratio)
+            - "odds_ratio": For binary outcomes (uses odds ratio)
+            - "risk_ratio": For survival/binary outcomes (uses risk ratio)
         outcome_rare : bool, default=False
             Passed to compute_evalue() for odds ratio conversion.
         
@@ -3663,6 +3693,10 @@ class CausalInferenceModel:
             - Robustness classification
             - Interpretation string
         """
+        valid_types = ["cohens_d", "odds_ratio", "risk_ratio", "log_odds"]
+        if effect_type not in valid_types:
+            raise ValueError(f"effect_type must be one of {valid_types}, got '{effect_type}'")
+        
         rows = []
         
         for outcome_name, res in results_dict.items():
@@ -3671,36 +3705,22 @@ class CausalInferenceModel:
             ci_lower = res.get("ci_lower")
             ci_upper = res.get("ci_upper")
             
-            # Auto-detect effect type based on outcome characteristics
-            if effect_type == "auto":
-                if cohens_d is not None and abs(cohens_d) > 0.01:
-                    mean_ctrl = res.get("mean_control", 0.5)
-                    if 0 < mean_ctrl < 1 and abs(effect) > 0.1:
-                        use_type = "log_odds"
-                        use_effect = effect
-                        use_ci_lower = ci_lower
-                        use_ci_upper = ci_upper
-                    else:
-                        use_type = "cohens_d"
-                        use_effect = cohens_d
-                        mean_treat = res.get("mean_treatment", 0)
-                        mean_ctrl = res.get("mean_control", 0)
-                        if cohens_d != 0:
-                            raw_diff = mean_treat - mean_ctrl
-                            scale_factor = cohens_d / raw_diff if raw_diff != 0 else 1
-                            use_ci_lower = ci_lower * scale_factor if ci_lower else None
-                            use_ci_upper = ci_upper * scale_factor if ci_upper else None
-                        else:
-                            use_ci_lower = None
-                            use_ci_upper = None
+            # Use the specified effect type
+            if effect_type == "cohens_d":
+                use_effect = cohens_d
+                # For Cohen's d, need to convert CI bounds to Cohen's d scale
+                mean_treat = res.get("mean_treatment", 0)
+                mean_ctrl = res.get("mean_control", 0)
+                if cohens_d is not None and cohens_d != 0:
+                    raw_diff = mean_treat - mean_ctrl
+                    scale_factor = cohens_d / raw_diff if raw_diff != 0 else 1
+                    use_ci_lower = ci_lower * scale_factor if ci_lower else None
+                    use_ci_upper = ci_upper * scale_factor if ci_upper else None
                 else:
-                    use_type = "log_odds"
-                    use_effect = effect
-                    use_ci_lower = ci_lower
-                    use_ci_upper = ci_upper
+                    use_ci_lower = None
+                    use_ci_upper = None
             else:
-                use_type = effect_type
-                use_effect = cohens_d if effect_type == "cohens_d" else effect
+                use_effect = effect
                 use_ci_lower = ci_lower
                 use_ci_upper = ci_upper
             
@@ -3709,19 +3729,19 @@ class CausalInferenceModel:
                     effect=use_effect,
                     ci_lower=use_ci_lower,
                     ci_upper=use_ci_upper,
-                    effect_type=use_type,
+                    effect_type=effect_type,
                     outcome_rare=outcome_rare
                 )
                 
                 rows.append({
                     "Outcome": outcome_name,
-                    "Effect_Type": use_type,
+                    "Effect_Type": effect_type,
                     "Effect_Value": use_effect,
                     "Effect_RR": evalue_result["effect_rr"],
                     "E_Value_Point": evalue_result["evalue_point"],
                     "E_Value_CI": evalue_result["evalue_ci"],
                     "Robustness": evalue_result["robustness"],
-                    "Interpretation": evalue_result["interpretation"],  # <-- ADDED
+                    "Interpretation": evalue_result["interpretation"],
                     "P_Value": res.get("p_value"),
                     "Significant": res.get("significant", False)
                 })
@@ -3729,7 +3749,7 @@ class CausalInferenceModel:
                 print(f"  Warning: Could not compute E-value for {outcome_name}: {e}")
                 rows.append({
                     "Outcome": outcome_name,
-                    "Effect_Type": use_type,
+                    "Effect_Type": effect_type,
                     "Effect_Value": use_effect,
                     "Effect_RR": None,
                     "E_Value_Point": None,
@@ -3756,7 +3776,7 @@ class CausalInferenceModel:
         print("    E-value < 1.5 : Very weak - easily explained by confounding")
         print("=" * 70)
         
-        # Print per-outcome interpretations for significant results  <-- ADDED BLOCK
+        # Print per-outcome interpretations for significant results
         sig_rows = evalue_df[evalue_df["Significant"] == True]
         if not sig_rows.empty:
             print("\n  Per-Outcome Interpretations (significant results only):")

@@ -1,4 +1,14 @@
 """
+⚠️  DEVELOPMENT CODE DISCLAIMER ⚠️
+
+This code is provided for educational purposes as part of a causal inference
+tutorial for I/O psychologists. While developed in good faith and based on
+established statistical methods, this is ACTIVE DEVELOPMENT CODE that:
+
+• May contain bugs or unvalidated edge cases
+• Has not undergone formal validation for production use
+• Should be used with appropriate statistical supervision
+
 CausalDiagnostics — unified causal-inference diagnostic toolkit.
 
 Usage:
@@ -24,6 +34,27 @@ try:
 except ImportError:
     display = print
 
+
+# Global flag to track if disclaimer has been shown
+_DISCLAIMER_SHOWN = False
+
+def _show_development_disclaimer():
+    """Display development code disclaimer once per session."""
+    global _DISCLAIMER_SHOWN
+    if not _DISCLAIMER_SHOWN:
+        print("\n" + "="*80)
+        print("🚨 CAUSAL INFERENCE TUTORIAL - DEVELOPMENT CODE DISCLAIMER 🚨")
+        print("="*80)
+        print("This code is provided for EDUCATIONAL PURPOSES ONLY as part of")
+        print("a causal inference tutorial for I/O psychologists.")
+        print()
+        print("⚠️  IMPORTANT LIMITATIONS:")
+        print("   • Active development code - may contain bugs")
+        print("   • Not validated for production research use")
+        print("   • Requires statistical supervision and verification")
+        print("="*80)
+        print()
+        _DISCLAIMER_SHOWN = True
 
 class CausalDiagnostics:
     """
@@ -53,6 +84,7 @@ class CausalDiagnostics:
     """
 
     def __init__(self):
+        _show_development_disclaimer()
         self.overlap_thresholds = {
             'smd_minor': 0.1,
             'smd_moderate': 0.25,
