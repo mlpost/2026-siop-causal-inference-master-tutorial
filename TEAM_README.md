@@ -29,14 +29,14 @@ Synthetic data generation → Pre-modeling diagnostics → IPTW + Doubly Robust 
 ├── TEAM_README.md                    # ← You are here
 │
 ├── supp_functions/
-│   ├── causal_diagnostics.py         # CausalDiagnostics class (2,393 lines)
-│   └── causal_inference_modelling.py # CausalInferenceModel class (5,790 lines)
+│   ├── causal_diagnostics.py         # CausalDiagnostics class (2,425 lines)
+│   └── causal_inference_modelling.py # CausalInferenceModel class (4,452 lines)
 │
 ├── data/
 │   ├── s2_manager_data.csv           # Pre-generated dataset (9,000 rows × 25 cols)
 │   └── s2_data_descriptives.xlsx     # Formatted Excel descriptives (8 sheets)
 │
-├── pregenereated_results/s2/
+├── pregenerated_results/s2/
 │   └── s2_overlap_diagnostics_summary.txt  # Reference overlap diagnostics
 │
 └── results/                          # Workshop-generated output (created at runtime)
@@ -46,10 +46,10 @@ Synthetic data generation → Pre-modeling diagnostics → IPTW + Doubly Robust 
 
 | File | Lines | Role |
 |------|-------|------|
-| `s2_generate_data.py` | ~1,091 | Data generation + Excel reporting |
-| `causal_diagnostics.py` | ~2,393 | All pre-modeling & balance diagnostics |
-| `causal_inference_modelling.py` | ~5,388 | IPTW/GEE, Cox PH survival, DML, summary tables, sensitivity, reports |
-| `scenario2_workshop.ipynb` | 47 cells | Interactive walkthrough of the full pipeline |
+| `s2_generate_data.py` | ~1,092 | Data generation + Excel reporting |
+| `causal_diagnostics.py` | ~2,425 | All pre-modeling & balance diagnostics |
+| `causal_inference_modelling.py` | ~4,452 | IPTW/GEE, Cox PH survival, DML, summary tables, sensitivity, reports |
+| `scenario2_workshop.ipynb` | 46 cells | Interactive walkthrough of the full pipeline |
 
 ---
 
@@ -80,15 +80,15 @@ See the public [README.md](README.md) for Colab clone + setup instructions.
 
 | Package | Version | Purpose |
 |---------|---------|---------|
-| `pandas` | 2.2.2 | Data manipulation |
-| `numpy` | 1.26.4 | Numerical operations |
-| `statsmodels` | 0.14.2 | GEE, propensity score models, VIF |
-| `scikit-learn` | 1.5.1 | Random Forest (diagnostics + DML nuisance models) |
+| `pandas` | ≥2.2.2 | Data manipulation |
+| `numpy` | ≥2.0.0 | Numerical operations |
+| `statsmodels` | ≥0.14.2 | GEE, propensity score models, VIF |
+| `scikit-learn` | ≥1.6.0 | Random Forest (diagnostics + DML nuisance models) |
 | `econml` | ≥0.15.0 | Double Machine Learning (Linear DML, Causal Forest) |
-| `scipy` | 1.13.1 | Statistical tests |
-| `matplotlib` / `seaborn` | 3.8.4 / 0.13.2 | Plotting |
+| `scipy` | ≥1.14.0 | Statistical tests |
+| `matplotlib` / `seaborn` | ≥3.9.0 / ≥0.13.2 | Plotting |
 | `lifelines` | ≥0.27.0 | Survival analysis (Cox PH, Kaplan-Meier) |
-| `openpyxl` | 3.1.5 | Excel export with formatting |
+| `openpyxl` | ≥3.1.5 | Excel export with formatting |
 
 ---
 
@@ -235,7 +235,7 @@ continuous_vars = ['age', 'tenure_months', 'num_direct_reports', 'tot_span_of_co
 
 ## 6. Notebook Walkthrough (scenario2_workshop.ipynb)
 
-The notebook has **47 cells** (32 code + 15 markdown) organized into these sections:
+The notebook has **46 cells** (27 code + 19 markdown) organized into these sections:
 
 | Section | Cells | What Happens |
 |---------|-------|-------------|
@@ -298,85 +298,7 @@ evalues = CausalInferenceModel.compute_evalues_from_results(survival_results, ef
 report = CausalInferenceModel.generate_survival_summary_report(summary, evalues, survival_results, survival_plot_fig=fig)
 ```
 
----
-
-## 7. Key Design Decisions to Review
-
-These are the most impactful choices — feedback is especially valuable here:
-
-### Statistical Methodology
-
-1. **Baseline exclusion from PS model** — Baseline outcomes (`baseline_*`) are excluded from the propensity score model and only included in the GEE outcome model (doubly robust). This avoids outcome-specific PS models. *Is this the right call for this teaching context?*
-
-2. **Stabilized + trimmed IPTW** — Weights are stabilized by marginal treatment probability and trimmed at the 99th percentile by default. *Are the defaults appropriate for the sample size (N=9,000, ~500 treated)?*
-
-3. **GEE sandwich SEs** — Standard errors account for within-cluster correlation but do **not** propagate first-stage PS estimation uncertainty. The docstring acknowledges this. *Should we add a bootstrap option or is the caveat sufficient?*
-
-4. **DML ATT derivation** — ATT from Causal Forest is derived by averaging CATE over treated observations, not a dedicated ATT estimator. *Is this adequately flagged for a teaching audience?*
-
-4b. **Cox time interaction model** — Retention analysis fits a single Cox model with treatment × time-period interaction terms (person-period expansion) rather than separate models per interval. This reveals when the treatment effect is strongest (first 3 months) but relies on uncorrected multiple tests across periods. *Is the pedagogical benefit worth the additional complexity?*
-
-5. **FDR correction** — Applied across outcomes in `build_summary_table()`, not within individual models. *Correct statistical practice, but is it explained clearly enough?*
-
-6. **E-value computation** — Cohen's d → RR via VanderWeele (2017) formula `RR ≈ exp(0.91 * d)`. Binary outcomes use log-odds. *Are the auto-detection heuristics reliable?*
-
-### Pedagogical Design
-
-7. **Two-class architecture** — All logic in `CausalDiagnostics` + `CausalInferenceModel`, no package install, `sys.path.append`. *Clean for a workshop? Or should we make it pip-installable?*
-
-8. **Overlap diagnostics depth** — `check_covariate_overlap()` produces extremely detailed output with interpretation guides, ASCII boxes, and tier-based estimand recommendations. *Is the verbosity appropriate for the audience (I/O psych practitioners)?*
-
-9. **Ground-truth dataset** — Known effect sizes allow attendees to verify their analyses. The workload outcome is intentionally null. *Are the effect sizes realistic for this domain?*
-
-10. **Column name sanitization** — `_clean_column_name()` replaces special characters for patsy formula compatibility. *Could this cause confusion if attendees bring their own data?*
-
-### Code Quality
-
-11. **No test suite** — Teaching repo, no unit tests. *Should we add at least smoke tests?*
-
-12. **`generate_gee_summary_report()` / `generate_survival_summary_report()`** — Auto-generate Markdown narratives with tables, balance checks, E-values, HR interpretation, and trend detection. The survival report can embed inline KM plot images via base64. *Is the auto-generated text accurate and helpful, or could it mislead?*
-
-13. **Excel formatting helpers** — Defined inline in `s2_generate_data.py` (not importable). `CausalInferenceModel` has its own simpler export. *Should these be consolidated?*
-
----
-
-## 8. How to Review This Project
-
-### If You Have 15 Minutes
-
-1. Read this document
-2. Skim the notebook markdown cells (the teaching narrative between code cells)
-3. Check the built-in ground truth table above against the analysis results
-
-### If You Have 1 Hour
-
-1. Run the notebook end-to-end (all 47 cells execute in ~2-3 minutes)
-2. Review the overlap diagnostics output — is it understandable?
-3. Compare ATE vs ATT results — does the narrative in the comparison table make sense?
-4. Check E-value interpretations — are the robustness classifications reasonable?
-5. Review the Cox time interaction survival results — does the temporal decay pattern make sense?
-6. Look at the DML CATE distribution (final cell) — does heterogeneity match the data generation?
-
-### If You Have a Half Day
-
-1. Read `s2_generate_data.py` to understand the data generating process
-2. Trace the full `analyze_treatment_effect()` pipeline in `causal_inference_modelling.py`
-3. Review `check_covariate_overlap()` in `causal_diagnostics.py` — check the tier logic
-4. Assess whether the teaching narrative flows logically through the notebook
-5. Try modifying an outcome or variable list and re-running — does the code handle edge cases?
-
-### Specific Feedback Requests
-
-- [ ] Is the statistical methodology sound? Any errors in the IPTW/GEE implementation?
-- [ ] Is the DML section (using `econml`) correctly implemented?
-- [ ] Are the auto-generated narrative reports accurate and not misleading?
-- [ ] Is the overall flow (diagnostics → IPTW → DML → sensitivity) pedagogically effective?
-- [ ] Is the overlap diagnostics output overwhelming or just right for this audience?
-- [ ] Are there any I/O psychology domain-specific issues with the framing?
-
----
-
-## 9. Common Gotchas
+## 7. Common Gotchas
 
 | Issue | Explanation |
 |-------|-------------|
@@ -393,7 +315,7 @@ These are the most impactful choices — feedback is especially valuable here:
 
 ---
 
-## 10. Regenerating Data
+## 8. Regenerating Data
 
 ```bash
 python s2_generate_data.py
@@ -407,7 +329,7 @@ The script is deterministic (seed=42). Output should be identical across runs on
 
 ---
 
-## 11. Glossary of Key Terms
+## 9. Glossary of Key Terms
 
 | Term | Definition |
 |------|-----------|
@@ -430,4 +352,4 @@ The script is deterministic (seed=42). Output should be identical across runs on
 
 ---
 
-*Last updated: 2026-03-09*
+*Last updated: 2026-03-17*

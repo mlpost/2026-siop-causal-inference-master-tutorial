@@ -70,21 +70,13 @@ Post-estimation summaries & sensitivity
     ``compute_rmst_difference``
         Restricted Mean Survival Time difference (business-friendly metric).
 
-Report generation (static, Markdown)
-    ``generate_gee_summary_report``
-        Technical summary for survey outcome families.
-    ``generate_survival_summary_report``
-        Technical summary for survival outcomes (optional inline KM figure).
-    ``generate_comparison_table``
-        ATE vs. ATT side-by-side comparison with effect sizes and E-values.
 
 Utilities (static)
     ``_clean_column_name``
         Sanitize column names for statsmodels formula compatibility.
     ``_significance_stars``
         Convert p-value to significance stars (``***``/``**``/``*``).
-    ``_format_pvalue``
-        Format p-value for display.
+
 
 Deprecated
     ``calculate_standardized_mean_difference``
@@ -1664,7 +1656,6 @@ class CausalInferenceModel:
     # ==================================================================
     # Shared IPTW data-preparation pipeline (Steps 0 – 2)
     # ==================================================================
-
     def _prepare_iptw_data(
         self,
         data: pd.DataFrame,
@@ -1714,8 +1705,11 @@ class CausalInferenceModel:
         outcome_var : str, optional
             Outcome column (GEE pipeline).
         baseline_var : str, optional
-            Baseline covariate included in GEE outcome model but excluded
-            from the propensity-score model (doubly robust adjustment).
+            Baseline covariate included in both the propensity-score model
+            and the GEE outcome model. Treated as a confounder because
+            baseline performance typically influences treatment assignment
+            in practice. Including it in both models preserves double
+            robustness while protecting against selection bias.
         time_var, event_var : str, optional
             Duration and event-indicator columns (survival pipeline).
         preserve_strata_backups : bool
@@ -1737,14 +1731,47 @@ class CausalInferenceModel:
             ``_strata_backup_map``, ``dummy_to_parent``,
             ``cleaned_cat_vars``.
         """
+
+        # ------------------------------------------------------------------
+        # Internal helper: build a single balance-result row
+        # ------------------------------------------------------------------
+        def _make_balance_row(
+            var_name: str,
+            var_type: str,
+            smd_before: Optional[float],
+            smd_after: Optional[float],
+        ) -> Dict:
+            improvement = (
+                abs(smd_before) - abs(smd_after)
+                if smd_before is not None and smd_after is not None
+                else None
+            )
+            return {
+                "variable": var_name,
+                "type": var_type,
+                "smd_before_weighting": smd_before,
+                "smd_after_weighting": smd_after,
+                "smd_improvement": improvement,
+                "balanced_before_weighting": (
+                    abs(smd_before) < 0.1 if smd_before is not None else None
+                ),
+                # Intentionally False (not None) so the balance summary
+                # count treats uncomputable rows as imbalanced.
+                "balanced_after_weighting": (
+                    abs(smd_after) < 0.1 if smd_after is not None else False
+                ),
+            }
+
         # ------------------------------------------------------------------
         # Step 0: Data prep
         # ------------------------------------------------------------------
-        # Determine which columns must be present
+        # Build a single covariate list that covers both PS and outcome models.
+        # baseline_var is treated as a confounder (included in both models)
+        # because baseline performance typically influences treatment assignment.
+        # Note: concatenation creates a new list so the caller's lists are not mutated.
         ps_covariates_raw = categorical_vars + binary_vars + continuous_vars
-        outcome_covariates_raw = list(ps_covariates_raw)
         if baseline_var:
-            outcome_covariates_raw.append(baseline_var)
+            ps_covariates_raw.append(baseline_var)
 
         id_columns: List[str] = [treatment_var, cluster_var]
         if outcome_var:
@@ -1754,7 +1781,7 @@ class CausalInferenceModel:
         if event_var:
             id_columns.append(event_var)
 
-        all_needed = list(set(id_columns + outcome_covariates_raw))
+        all_needed = list(set(id_columns + ps_covariates_raw))
         df = data[all_needed].dropna().copy()
 
         # --- Basic data validations ---
@@ -1802,27 +1829,31 @@ class CausalInferenceModel:
         # --- One-hot encode categorical variables ---
         cols_before_dummies = set(df.columns)
         df = pd.get_dummies(df, columns=categorical_vars, drop_first=True)
-        dummy_columns = sorted(set(df.columns) - cols_before_dummies)
+        # No sort: ordering is irrelevant downstream and sort is O(n log n)
+        dummy_columns = list(set(df.columns) - cols_before_dummies)
 
         # --- Clean all column names ---
         rename_map = {c: self._clean_column_name(c) for c in df.columns}
         df.rename(columns=rename_map, inplace=True)
 
-        # Remap key variable references
+        # Remap all key variable references to their cleaned names
         treatment_var = self._clean_column_name(treatment_var)
-        cluster_var = self._clean_column_name(cluster_var)
+        cluster_var   = self._clean_column_name(cluster_var)
         if outcome_var:
-            outcome_var = self._clean_column_name(outcome_var)
+            outcome_var  = self._clean_column_name(outcome_var)
         if baseline_var:
             baseline_var = self._clean_column_name(baseline_var)
         if time_var:
-            time_var = self._clean_column_name(time_var)
+            time_var     = self._clean_column_name(time_var)
         if event_var:
-            event_var = self._clean_column_name(event_var)
+            event_var    = self._clean_column_name(event_var)
 
         continuous_vars = [self._clean_column_name(v) for v in continuous_vars]
-        binary_vars = [self._clean_column_name(v) for v in binary_vars]
-        dummy_columns = [self._clean_column_name(c) for c in dummy_columns]
+        binary_vars     = [self._clean_column_name(v) for v in binary_vars]
+        dummy_columns   = [self._clean_column_name(c) for c in dummy_columns]
+
+        # baseline_var is already cleaned above — no double-clean needed
+        baseline_vars_clean = [baseline_var] if baseline_var else []
 
         # --- Build dummy → parent mapping (used for auto-stratification) ---
         dummy_to_parent: Dict[str, str] = {}
@@ -1834,57 +1865,49 @@ class CausalInferenceModel:
 
         # --- Track balance variables ---
         balance_var_names = (
-            [v for v in continuous_vars if v in df.columns]
-            + [v for v in binary_vars if v in df.columns]
-            + [dc for dc in dummy_columns if dc in df.columns]
+            [v for v in continuous_vars       if v in df.columns]
+            + [v for v in binary_vars         if v in df.columns]
+            + [dc for dc in dummy_columns     if dc in df.columns]
+            + [v for v in baseline_vars_clean if v in df.columns]
         )
         balance_var_types: Dict[str, str] = {
             v: "continuous" for v in continuous_vars if v in df.columns
         }
-        balance_var_types.update({v: "binary" for v in binary_vars if v in df.columns})
-        balance_var_types.update({dc: "categorical" for dc in dummy_columns if dc in df.columns})
+        balance_var_types.update({v:  "binary"     for v  in binary_vars         if v  in df.columns})
+        balance_var_types.update({dc: "categorical" for dc in dummy_columns       if dc in df.columns})
+        balance_var_types.update({v:  "continuous"  for v  in baseline_vars_clean if v  in df.columns})
 
         # --- Build covariate lists ---
-        _exclude = {treatment_var, cluster_var}
-        if outcome_var:
-            _exclude.add(outcome_var)
-        if time_var:
-            _exclude.add(time_var)
-        if event_var:
-            _exclude.add(event_var)
-        _strata_backup_cols = set(_strata_backup_map.values())
-        _exclude |= _strata_backup_cols
+        # Exclude non-covariate columns and strata backup columns
+        _exclude = {treatment_var, cluster_var} | {
+            v for v in [outcome_var, time_var, event_var] if v
+        } | set(_strata_backup_map.values())
 
         covariates = [c for c in df.columns if c not in _exclude]
 
-        # PS covariates: confounders only (exclude baseline for doubly robust)
-        if baseline_var:
-            ps_covariates = [c for c in covariates if c != baseline_var]
-        else:
-            ps_covariates = list(covariates)
+        # PS covariates: all covariates including baseline (treated as confounder)
+        ps_covariates = list(covariates)
 
         # --- Validate covariates ---
         if len(covariates) == 0:
             raise ValueError("No covariates remaining after data processing")
 
-        covariate_df = df[covariates]
-        if covariate_df.empty or covariate_df.shape[1] == 0:
-            raise ValueError(
-                f"Empty covariate matrix after processing. Shape: {covariate_df.shape}"
-            )
-
-        # Remove constant covariates
+        # --- Remove constant covariates ---
         constant_vars = [var for var in covariates if df[var].nunique() <= 1]
         if constant_vars:
             print(f"  Warning: Removing constant variables: {constant_vars}")
-            covariates = [v for v in covariates if v not in constant_vars]
-            ps_covariates = [v for v in ps_covariates if v not in constant_vars]
+            constant_set = set(constant_vars)
+            covariates        = [v for v in covariates        if v not in constant_set]
+            ps_covariates     = [v for v in ps_covariates     if v not in constant_set]
+            balance_var_names = [v for v in balance_var_names if v not in constant_set]
+            balance_var_types = {k: v for k, v in balance_var_types.items()
+                                if k not in constant_set}
             if len(covariates) == 0:
                 raise ValueError(
                     "No valid covariates remaining after removing constant variables"
                 )
 
-        # Final null check
+        # --- Final null check ---
         final_covariate_df = df[covariates]
         if final_covariate_df.isnull().all().any():
             null_vars = final_covariate_df.columns[
@@ -1912,7 +1935,7 @@ class CausalInferenceModel:
         # --- Positivity / overlap warning ---
         ps_vals = df["propensity_score"]
         n_near_zero = (ps_vals < 0.01).sum()
-        n_near_one = (ps_vals > 0.99).sum()
+        n_near_one  = (ps_vals > 0.99).sum()
         if n_near_zero > 0 or n_near_one > 0:
             print(
                 f"  Warning: Positivity concern: {n_near_zero} observations "
@@ -1922,12 +1945,11 @@ class CausalInferenceModel:
         # --- Propensity score overlap plot ---
         ps_overlap_fig = None
         if plot_propensity:
-            ps_plot_title = f"Propensity Score Overlap — {analysis_label}"
             try:
                 ps_overlap_fig = self.plot_propensity_overlap(
                     data=df,
                     treatment_var=treatment_var,
-                    title=ps_plot_title,
+                    title=f"Propensity Score Overlap — {analysis_label}",
                 )
             except Exception as e:
                 print(f"  Warning: Could not generate propensity score plot: {e}")
@@ -1946,19 +1968,22 @@ class CausalInferenceModel:
         # --- Weight distribution plot ---
         weight_dist_fig = None
         if plot_weights:
-            wt_plot_title = f"IPTW Weight Distribution — {analysis_label}"
             try:
                 weight_dist_fig = self.plot_weight_distribution(
                     data=df,
                     treatment_var=treatment_var,
                     estimand=estimand,
-                    title=wt_plot_title,
+                    title=f"IPTW Weight Distribution — {analysis_label}",
                 )
             except Exception as e:
                 print(f"  Warning: Could not generate weight distribution plot: {e}")
 
         # --- Post-weighting balance check via CausalDiagnostics ---
+        # CausalDiagnostics is instantiated locally; if this method is called
+        # in a loop, consider hoisting _cd to the class level to avoid
+        # repeated construction overhead.
         _cd = CausalDiagnostics()
+        balance_results = []
         try:
             _raw_balance = _cd.compute_balance_df(
                 data=df,
@@ -1967,30 +1992,23 @@ class CausalInferenceModel:
                 weights=df["iptw"],
                 already_encoded=True,
             )
-            balance_results = []
             for var_name in _raw_balance.index:
                 row = _raw_balance.loc[var_name]
-                smd_before = row["Unweighted SMD"]
-                smd_after = row["Weighted SMD"]
-                improvement = abs(smd_before) - abs(smd_after)
-                balance_results.append({
-                    "variable": var_name,
-                    "type": balance_var_types.get(var_name, "unknown"),
-                    "smd_before_weighting": smd_before,
-                    "smd_after_weighting": smd_after,
-                    "smd_improvement": improvement,
-                    "balanced_before_weighting": abs(smd_before) < 0.1,
-                    "balanced_after_weighting": abs(smd_after) < 0.1,
-                })
-            balance_df = pd.DataFrame(balance_results)
+                balance_results.append(_make_balance_row(
+                    var_name,
+                    balance_var_types.get(var_name, "unknown"),
+                    row["Unweighted SMD"],
+                    row["Weighted SMD"],
+                ))
+
         except Exception as e:
             print(
                 f"  Warning: CausalDiagnostics balance computation failed ({e}); "
                 f"falling back to inline SMD computation."
             )
-            # --- Fallback: inline computation ---
+            # Fallback: compute SMD inline using a uniform-weight column
+            # as the unweighted baseline, then drop it immediately.
             df["_uniform_wt"] = 1.0
-            balance_results = []
             for var_name in balance_var_names:
                 if var_name not in df.columns:
                     continue
@@ -2001,42 +2019,35 @@ class CausalInferenceModel:
                     smd_after = self.calculate_standardized_mean_difference(
                         df, var_name, treatment_var, "iptw"
                     )
-                    improvement = abs(smd_before) - abs(smd_after)
-                    balance_results.append({
-                        "variable": var_name,
-                        "type": balance_var_types.get(var_name, "unknown"),
-                        "smd_before_weighting": smd_before,
-                        "smd_after_weighting": smd_after,
-                        "smd_improvement": improvement,
-                        "balanced_before_weighting": abs(smd_before) < 0.1,
-                        "balanced_after_weighting": abs(smd_after) < 0.1,
-                    })
+                    balance_results.append(_make_balance_row(
+                        var_name,
+                        balance_var_types.get(var_name, "unknown"),
+                        smd_before,
+                        smd_after,
+                    ))
                 except Exception:
-                    balance_results.append({
-                        "variable": var_name,
-                        "type": balance_var_types.get(var_name, "unknown"),
-                        "smd_before_weighting": None,
-                        "smd_after_weighting": None,
-                        "smd_improvement": None,
-                        "balanced_before_weighting": None,
-                        "balanced_after_weighting": False,
-                    })
+                    balance_results.append(_make_balance_row(
+                        var_name,
+                        balance_var_types.get(var_name, "unknown"),
+                        None,
+                        None,
+                    ))
             df.drop(columns=["_uniform_wt"], inplace=True)
-            balance_df = pd.DataFrame(balance_results)
 
-        if balance_df.empty:
-            balance_df = pd.DataFrame(
-                columns=[
-                    "variable", "type", "smd_before_weighting",
-                    "smd_after_weighting", "smd_improvement",
-                    "balanced_before_weighting", "balanced_after_weighting",
-                ]
-            )
+        balance_df = (
+            pd.DataFrame(balance_results)
+            if balance_results
+            else pd.DataFrame(columns=[
+                "variable", "type", "smd_before_weighting",
+                "smd_after_weighting", "smd_improvement",
+                "balanced_before_weighting", "balanced_after_weighting",
+            ])
+        )
 
         # --- Balance summary ---
         if not balance_df.empty and "balanced_after_weighting" in balance_df.columns:
-            n_imbalanced = int(balance_df["balanced_after_weighting"].eq(False).sum())
-            n_total_vars = len(balance_df)
+            n_imbalanced  = int(balance_df["balanced_after_weighting"].eq(False).sum())
+            n_total_vars  = len(balance_df)
             if n_imbalanced == 0:
                 print(
                     f"  ✓ Post-weighting balance: all {n_total_vars} "
@@ -2049,30 +2060,30 @@ class CausalInferenceModel:
                 )
 
         return {
-            "df": df,
-            "ps_model": ps_model,
-            "weight_stats": weight_stats,
-            "balance_df": balance_df,
-            "ps_overlap_fig": ps_overlap_fig,
-            "weight_dist_fig": weight_dist_fig,
-            "covariates": covariates,
-            "ps_covariates": ps_covariates,
-            "dummy_columns": dummy_columns,
+            "df":                df,
+            "ps_model":          ps_model,
+            "weight_stats":      weight_stats,
+            "balance_df":        balance_df,
+            "ps_overlap_fig":    ps_overlap_fig,
+            "weight_dist_fig":   weight_dist_fig,
+            "covariates":        covariates,
+            "ps_covariates":     ps_covariates,
+            "dummy_columns":     dummy_columns,
             "balance_var_names": balance_var_names,
             "balance_var_types": balance_var_types,
             # Cleaned variable references
-            "treatment_var": treatment_var,
-            "cluster_var": cluster_var,
-            "outcome_var": outcome_var,
-            "baseline_var": baseline_var,
-            "time_var": time_var,
-            "event_var": event_var,
-            "continuous_vars": continuous_vars,
-            "binary_vars": binary_vars,
+            "treatment_var":     treatment_var,
+            "cluster_var":       cluster_var,
+            "outcome_var":       outcome_var,
+            "baseline_var":      baseline_var,
+            "time_var":          time_var,
+            "event_var":         event_var,
+            "continuous_vars":   continuous_vars,
+            "binary_vars":       binary_vars,
             # Survival-specific
             "_strata_backup_map": _strata_backup_map,
-            "dummy_to_parent": dummy_to_parent,
-            "cleaned_cat_vars": cleaned_cat_vars,
+            "dummy_to_parent":    dummy_to_parent,
+            "cleaned_cat_vars":   cleaned_cat_vars,
         }
 
     # ==================================================================
@@ -3437,7 +3448,7 @@ class CausalInferenceModel:
         return {
             # --- Keys shared with analyze_treatment_effect() ---
             # These ensure compatibility with build_summary_table(),
-            # compute_evalues_from_results(), and generate_gee_summary_report().
+            # compute_evalues_from_results()
             "effect": hazard_ratio,          # HR from reference period or 12mo
             "estimand": estimand,
             "ci_lower": hr_ci_lower,         # HR CI lower bound
@@ -4434,975 +4445,7 @@ class CausalInferenceModel:
 
         return summary_df
 
-    # ==================================================================
-    # Report generation methods
-    # ==================================================================
-
-    @staticmethod
-    def _format_pvalue(p: float) -> str:
-        """Format a p-value for display in Markdown tables."""
-        if p < 0.0001:
-            return "< 0.0001"
-        elif p < 0.001:
-            return "< 0.001"
-        else:
-            return f"{p:.3f}"
-
-    @staticmethod
-    def generate_gee_summary_report(
-        summary_df: pd.DataFrame,
-        evalues_df: pd.DataFrame,
-        results_dict: Dict[str, Dict],
-        estimand: str,
-        family_label: str,
-        outcome_descriptions: Optional[Dict[str, str]] = None,
-        outcome_valence: Optional[Dict[str, str]] = None,
-    ) -> str:
-        """
-        Generate a Markdown technical summary for a family of outcomes.
-
-        Combines the results table, per-outcome narratives, balance verification,
-        and E-value sensitivity analysis into a single rendered Markdown block.
-        Designed for use with ``IPython.display.Markdown`` in Jupyter notebooks.
-
-        Parameters
-        ----------
-        summary_df : pd.DataFrame
-            Output of ``build_summary_table()`` for this family of outcomes.
-        evalues_df : pd.DataFrame
-            Output of ``compute_evalues_from_results()`` for this family.
-        results_dict : Dict[str, Dict]
-            Per-outcome results from ``analyze_treatment_effect()``.
-        estimand : str
-            "ATE" or "ATT".
-        family_label : str
-            Label for this outcome family, e.g. "Survey Outcomes (Continuous)".
-        outcome_descriptions : Dict[str, str], optional
-            Mapping from variable names to display-friendly names.
-        outcome_valence : Dict[str, str], optional
-            Mapping from variable names to direction interpretation.
-            Use ``"positive"`` when higher values are better (default),
-            ``"negative"`` when higher values are worse (e.g. burnout,
-            workload).  Outcomes not listed default to ``"positive"``.
-
-        Returns
-        -------
-        str
-            Markdown-formatted summary string.
-        """
-        if outcome_descriptions is None:
-            outcome_descriptions = {}
-        if outcome_valence is None:
-            outcome_valence = {}
-
-        fmt_p = CausalInferenceModel._format_pvalue
-        lines: list = []
-
-        # Detect outcome type from first result
-        first_key = next(iter(results_dict))
-        is_binary = results_dict[first_key].get("outcome_type") == "binary"
-
-        n_tests = len(summary_df)
-        correction = (
-            summary_df["Correction_Method"].iloc[0]
-            if "Correction_Method" in summary_df.columns
-            else "fdr_bh"
-        )
-        if correction == "none" or n_tests == 1:
-            correction_label = f"{n_tests} test, no correction needed"
-        else:
-            correction_label = f"{n_tests} tests, {correction.upper()}-corrected"
-
-        lines.append(f"#### {family_label} ({correction_label})")
-        lines.append("")
-
-        # ── Results table ──────────────────────────────────────────────
-        if is_binary:
-            lines.append(
-                f"| Outcome | {estimand} (log-odds) | Odds Ratio | "
-                f"95% CI (log-odds) | p (corrected) | Cohen's d | Significant? |"
-            )
-            lines.append(
-                "|---------|----------------|------------|" +
-                "-------------------|---------------|-----------|-------------|"
-            )
-            for _, row in summary_df.iterrows():
-                outcome = row["Outcome"]
-                name = outcome_descriptions.get(outcome, outcome)
-                eff = row["Effect"]
-                or_val = np.exp(eff)
-                ci_lo, ci_hi = row["CI_Lower"], row["CI_Upper"]
-                p_corr = row["P_Value_Corrected"]
-                d = row.get("Cohens_d")
-                sig = row["Significant"]
-                stars = row.get("Significance", "")
-
-                sig_str = f"Yes {stars}" if sig else "No"
-                d_str = f"{d:.2f}" if pd.notna(d) else "\u2014"
-
-                lines.append(
-                    f"| {name} | **{eff:+.2f}** | {or_val:.2f} | "
-                    f"[{ci_lo:.2f}, {ci_hi:.2f}] | {fmt_p(p_corr)} | {d_str} | {sig_str} |"
-                )
-        else:
-            lines.append(
-                f"| Outcome | {estimand} | 95% CI | p (corrected) | Cohen's d | Significant? |"
-            )
-            lines.append("|---------|-----|--------|---------------|-----------|-------------|")
-            for _, row in summary_df.iterrows():
-                outcome = row["Outcome"]
-                name = outcome_descriptions.get(outcome, outcome)
-                eff = row["Effect"]
-                ci_lo, ci_hi = row["CI_Lower"], row["CI_Upper"]
-                p_corr = row["P_Value_Corrected"]
-                d = row.get("Cohens_d")
-                sig = row["Significant"]
-                stars = row.get("Significance", "")
-
-                sig_str = f"Yes {stars}" if sig else "No"
-                d_str = f"{d:.2f}" if pd.notna(d) else "\u2014"
-
-                lines.append(
-                    f"| {name} | **{eff:+.2f}** | [{ci_lo:.2f}, {ci_hi:.2f}] | "
-                    f"{fmt_p(p_corr)} | {d_str} | {sig_str} |"
-                )
-
-        lines.append("")
-
-        # ── Per-outcome narratives ─────────────────────────────────────
-        for _, row in summary_df.iterrows():
-            outcome = row["Outcome"]
-            name = outcome_descriptions.get(outcome, outcome)
-            eff = row["Effect"]
-            sig = row["Significant"]
-            res = results_dict[outcome]
-            pct = res.get("pct_change")
-            d = res.get("cohens_d")
-            p_corr = row["P_Value_Corrected"]
-
-            # Determine valence-aware language
-            valence = outcome_valence.get(outcome, "positive")
-            if valence == "negative":
-                # Higher values are worse (e.g. workload, burnout)
-                quality_word = "worsening" if eff > 0 else "improvement"
-            else:
-                # Higher values are better (default)
-                quality_word = "improvement" if eff > 0 else "decline"
-
-            if not is_binary:
-                if sig:
-                    if pct is not None:
-                        pct_str = f"**{pct:+.1f}% relative {quality_word}**"
-                    else:
-                        pct_str = f"**{quality_word}**"
-                    lines.append(f"**{name}**")
-                    lines.append(
-                        f"- {estimand} of **{eff:+.2f}** (Cohen's d = {d:.2f}), "
-                        f"representing a {pct_str} vs. controls"
-                    )
-                    lines.append("")
-                else:
-                    lines.append(f"**{name}** \u2014 *No effect detected*")
-                    lines.append(
-                        f"- {estimand} of **{eff:+.2f}**, not statistically "
-                        f"significant (p = {p_corr:.3f})"
-                    )
-                    lines.append("")
-
-        if is_binary:
-            sig_rows = summary_df[summary_df["Significant"]]
-            if not sig_rows.empty:
-                ors = [
-                    (row["Outcome"], np.exp(row["Effect"]))
-                    for _, row in sig_rows.iterrows()
-                ]
-
-                # Range summary — use max/min OR (order-agnostic)
-                or_max = max(ors, key=lambda x: x[1])
-                or_min = min(ors, key=lambda x: x[1])
-                pct_high = (or_max[1] - 1) * 100
-                pct_low = (or_min[1] - 1) * 100
-                max_name = outcome_descriptions.get(or_max[0], or_max[0])
-                min_name = outcome_descriptions.get(or_min[0], or_min[0])
-                cohens_ds = [
-                    results_dict[o]["cohens_d"]
-                    for o, _ in ors
-                    if results_dict[o].get("cohens_d") is not None
-                ]
-                d_range = (
-                    f" with effect sizes ranging from "
-                    f"{min(cohens_ds):.2f}\u2013{max(cohens_ds):.2f}"
-                    if cohens_ds
-                    else ""
-                )
-
-                if len(ors) > 1:
-                    lines.append(
-                        f"- Significant outcomes show odds ranging from "
-                        f"{pct_low:+.0f}% ({min_name}) to "
-                        f"{pct_high:+.0f}% ({max_name}) relative to controls"
-                        f"{d_range}."
-                    )
-                else:
-                    lines.append(
-                        f"- {max_name}: OR = {or_max[1]:.2f} "
-                        f"({pct_high:+.0f}% odds vs. controls){d_range}."
-                    )
-
-                # Trend detection (only when >1 significant outcome)
-                if len(ors) > 1:
-                    vals = [o[1] for o in ors]
-                    is_decreasing = all(
-                        vals[i] >= vals[i + 1] for i in range(len(vals) - 1)
-                    )
-                    is_increasing = all(
-                        vals[i] <= vals[i + 1] for i in range(len(vals) - 1)
-                    )
-                    is_flat = max(vals) - min(vals) < 0.05
-
-                    if is_flat:
-                        lines.append(
-                            "- The treatment effect is **stable** across all "
-                            "significant outcomes."
-                        )
-                    elif is_decreasing:
-                        lines.append(
-                            "- The treatment effect **attenuates** from the "
-                            "first to last significant outcome (strongest at "
-                            f"{outcome_descriptions.get(ors[0][0], ors[0][0])}"
-                            f", weakest at "
-                            f"{outcome_descriptions.get(ors[-1][0], ors[-1][0])}"
-                            f"), consistent with an effect that fades over time "
-                            f"or across contexts."
-                        )
-                    elif is_increasing:
-                        lines.append(
-                            "- The treatment effect **strengthens** from the "
-                            "first to last significant outcome (weakest at "
-                            f"{outcome_descriptions.get(ors[0][0], ors[0][0])}"
-                            f", strongest at "
-                            f"{outcome_descriptions.get(ors[-1][0], ors[-1][0])}"
-                            f"), suggesting a cumulative or delayed benefit."
-                        )
-                    else:
-                        lines.append(
-                            "- The treatment effect is **non-monotonic** across "
-                            "significant outcomes \u2014 consider examining each "
-                            "outcome individually."
-                        )
-
-                lines.append("")
-
-                # Generic OR interpretation
-                top_or = or_max[1]
-                top_name = outcome_descriptions.get(or_max[0], or_max[0])
-                top_pct = (top_or - 1) * 100
-                direction = "more" if top_or > 1 else "less"
-                lines.append("**How to read the odds ratios:**")
-                lines.append(
-                    f"An odds ratio (OR) above 1.0 means treated individuals "
-                    f"were *{direction} likely* to experience the outcome than "
-                    f"untreated individuals. For example, an OR of "
-                    f"**{top_or:.2f} for {top_name}** means the odds were "
-                    f"**{top_pct:+.0f}%** relative to the comparison group. "
-                    f"As the OR approaches 1.0, the treatment effect weakens."
-                )
-                lines.append("")
-
-            # Handle case where no binary outcomes are significant
-            else:
-                lines.append(
-                    "No binary outcomes reached statistical significance "
-                    "after multiple testing correction."
-                )
-                lines.append("")
-
-        # ── Balance verification ───────────────────────────────────────
-        lines.append("#### Post-Weighting Balance Verification")
-        all_balanced = True
-        for outcome, res in results_dict.items():
-            bal_df = res.get("balance_df")
-            if bal_df is not None and "balanced_after_weighting" in bal_df.columns:
-                n_imbal = int(bal_df["balanced_after_weighting"].eq(False).sum())
-                if n_imbal > 0:
-                    all_balanced = False
-                    name = outcome_descriptions.get(outcome, outcome)
-                    lines.append(f"- \u26a0\ufe0f {name}: {n_imbal} imbalanced covariates")
-        if all_balanced:
-            lines.append(
-                f"- \u2705 All {len(results_dict)} outcomes passed balance verification "
-                f"(0 imbalanced covariates)."
-            )
-            lines.append(
-                "- IPTW successfully balanced observed confounders across treatment groups."
-            )
-        lines.append("")
-
-        # ── E-value table ──────────────────────────────────────────────
-        if evalues_df is not None and not evalues_df.empty:
-            lines.append("#### E-Value Sensitivity Analysis")
-            lines.append("")
-            lines.append("| Outcome | E-Value Point | E-Value CI | Robustness |")
-            lines.append("|---------|---------------|------------|------------|")
-            for _, row in evalues_df.iterrows():
-                outcome = row["Outcome"]
-                name = outcome_descriptions.get(outcome, outcome)
-                ev_pt = row["E_Value_Point"]
-                ev_ci = row["E_Value_CI"]
-                robustness = row["Robustness"]
-                sig = row.get("Significant", False)
-
-                ev_ci_str = f"{ev_ci:.2f}" if pd.notna(ev_ci) else "\u2014"
-                if sig:
-                    lines.append(
-                        f"| {name} | **{ev_pt:.2f}** | **{ev_ci_str}** | {robustness} |"
-                    )
-                else:
-                    lines.append(
-                        f"| {name} | {ev_pt:.2f} | {ev_ci_str} | {robustness} (ns) |"
-                    )
-            lines.append("")
-
-            # Per-outcome E-value interpretations (significant only)
-            sig_ev = evalues_df[evalues_df["Significant"] == True]
-            if not sig_ev.empty:
-                lines.append("**Significant outcome interpretations:**")
-                lines.append("")
-                for _, row in sig_ev.iterrows():
-                    outcome = row["Outcome"]
-                    name = outcome_descriptions.get(outcome, outcome)
-                    interp = row.get("Interpretation", "")
-                    if pd.notna(interp) and interp:
-                        lines.append(f"- **{name}:** {interp}")
-                        lines.append("")
-
-        return "\n".join(lines)
     
-    @staticmethod
-    def generate_survival_summary_report(
-        survival_summary_df: pd.DataFrame,
-        survival_evalues_df: pd.DataFrame,
-        survival_results_dict: Dict[str, Dict],
-        estimand: str,
-        outcome_descriptions: Optional[Dict[str, str]] = None,
-        outcome_valence: Optional[Dict[str, str]] = None,
-        survival_plot_fig: Optional[object] = None,
-    ) -> str:
-        """
-        Generate a Markdown technical summary for survival (time-to-event) outcomes.
+    
 
-        Produces a report structured around period-specific hazard ratios from
-        Cox time interaction models, survival probabilities at snapshot timepoints,
-        and RMST differences. Designed to be rendered alongside
-        generate_gee_summary_report() in the ATE/ATT technical summary cells.
 
-        Parameters
-        ----------
-        survival_summary_df : pd.DataFrame
-            Output of ``build_survival_summary_table()`` for retention outcomes.
-        survival_evalues_df : pd.DataFrame
-            Output of ``compute_evalues_from_results()`` for retention outcomes.
-            Should be computed with effect_type='risk_ratio'.
-        survival_results_dict : Dict[str, Dict]
-            Per-outcome results from ``analyze_survival_effect()``.
-            Keys are outcome names (e.g. 'retention'), values are result dicts.
-        estimand : str
-            "ATE" or "ATT".
-        outcome_descriptions : Dict[str, str], optional
-            Mapping from variable names to display-friendly names.
-            e.g. {'retention': 'Manager Retention (Survival)'}
-        outcome_valence : Dict[str, str], optional
-            Not used for survival outcomes (HR direction is self-explanatory),
-            but accepted for API consistency with generate_gee_summary_report().
-        survival_plot_fig : matplotlib.figure.Figure, optional
-            A matplotlib Figure (e.g. from ``plot_survival_curves()``).
-            If provided, the figure is base64-encoded and embedded inline
-            in the Markdown report. If ``None``, the report is generated
-            without a plot.
-
-        Returns
-        -------
-        str
-            Markdown-formatted summary string.
-        """
-        if outcome_descriptions is None:
-            outcome_descriptions = {}
-
-        fmt_p = CausalInferenceModel._format_pvalue
-        lines: list = []
-
-        n_tests = len(survival_summary_df)
-        correction = (
-            survival_summary_df["Correction_Method"].iloc[0]
-            if "Correction_Method" in survival_summary_df.columns
-            else "fdr_bh"
-        )
-        correction_label = (
-            f"{n_tests} test, no correction needed"
-            if correction == "none" or n_tests == 1
-            else f"{n_tests} tests, {correction.upper()}-corrected"
-        )
-
-        # Detect interaction type from first result
-        first_res = next(iter(survival_results_dict.values()))
-        time_interaction = first_res.get("time_interaction", "categorical")
-
-        lines.append(
-            f"#### Retention Outcomes — Survival Analysis "
-            f"({correction_label})"
-        )
-        lines.append("")
-
-        # Method description
-        if time_interaction == "categorical":
-            lines.append(
-                "> **Method**: IPTW-weighted Cox Proportional Hazards model with "
-                "categorical time interaction. Separate hazard ratios are estimated "
-                "per time period (reference + subsequent intervals), allowing the "
-                "treatment effect to vary over time. This approach is robust to "
-                "proportional hazards violations caused by seasonality or "
-                "time-varying treatment effectiveness. "
-                "HR < 1 = lower hazard of departure (training is protective). "
-                "Snapshot survival differences show IPTW-weighted Kaplan–Meier "
-                "retention probabilities at each timepoint."
-            )
-        else:
-            lines.append(
-                "> **Method**: IPTW-weighted Cox Proportional Hazards model with "
-                "continuous time interaction. The treatment effect is modeled as a "
-                "linear trend over time (days), allowing the hazard ratio to change "
-                "monotonically across the follow-up period. This approach is robust "
-                "to proportional hazards violations caused by seasonality or "
-                "time-varying treatment effectiveness. "
-                "HR < 1 = lower hazard of departure (training is protective). "
-                "HRs are reported at 3, 6, 9, and 12-month snapshots."
-            )
-        lines.append("")
-
-        # ── Optional survival curve plot ───────────────────────────────────────
-        if survival_plot_fig is not None:
-            try:
-                import io, base64
-                buf = io.BytesIO()
-                survival_plot_fig.savefig(buf, format="png", dpi=150,
-                                        bbox_inches="tight")
-                buf.seek(0)
-                img_b64 = base64.b64encode(buf.read()).decode("utf-8")
-                buf.close()
-                lines.append(
-                    f'<img src="data:image/png;base64,{img_b64}" '
-                    f'alt="Kaplan–Meier Survival Curves" '
-                    f'style="max-width:100%;" />'
-                )
-                lines.append("")
-            except Exception:
-                pass  # Graceful fallback: skip plot if encoding fails
-
-        # ── Period-specific HR table ───────────────────────────────────────────
-        lines.append("##### Period-Specific Hazard Ratios")
-        lines.append("")
-        lines.append("| Outcome | Period | HR | 95% CI | p-value | Sig? |")
-        lines.append("|---------|--------|----|--------|---------|------|")
-
-        for outcome, res in survival_results_dict.items():
-            name = outcome_descriptions.get(outcome, outcome)
-            period_hrs = res.get("period_hrs")
-
-            if period_hrs is None or period_hrs.empty:
-                lines.append(f"| {name} | — | — | — | — | — |")
-                continue
-
-            for _, period_row in period_hrs.iterrows():
-                period = period_row["period"]
-                hr_val = period_row["hazard_ratio"]
-                ci_l = period_row["hr_ci_lower"]
-                ci_u = period_row["hr_ci_upper"]
-                p_val = period_row["p_value"]
-                note = period_row.get("note", "")
-
-                # Append reference period note to period label if present
-                period_label = f"{period} *(ref)*" if note == "reference period" else period
-
-                stars = CausalInferenceModel._significance_stars(p_val)
-                sig_str = f"Yes {stars}" if p_val < 0.05 else "No"
-
-                lines.append(
-                    f"| {name} | {period_label} | **{hr_val:.3f}** | "
-                    f"[{ci_l:.3f}, {ci_u:.3f}] | "
-                    f"{fmt_p(p_val)} | {sig_str} |"
-                )
-
-        lines.append("")
-
-        # ── Per-outcome narrative ──────────────────────────────────────────────
-        for _, row in survival_summary_df.iterrows():
-            outcome = row["Outcome"]
-            name = outcome_descriptions.get(outcome, outcome)
-            sig = row.get("Significant", False)
-            p_corr = row.get("P_Value_Corrected", row.get("P_Value", float("nan")))
-            stars_v = row.get("Significance", "")
-
-            res = survival_results_dict.get(outcome, {})
-            period_hrs = res.get("period_hrs")
-            n_events_t = res.get("n_events_treated")
-            n_events_c = res.get("n_events_control")
-            n_treated = res.get("n_treated")
-            n_control = res.get("n_control")
-            ph_met = res.get("ph_assumption_met")
-            surv_t = res.get("mean_treatment")
-            surv_c = res.get("mean_control")
-
-            # Identify significant periods
-            sig_periods = []
-            if period_hrs is not None and not period_hrs.empty:
-                sig_periods = period_hrs[period_hrs["p_value"] < 0.05].to_dict("records")
-
-            # Detect weakening trend: HR increasing over time
-            weakening = False
-            if period_hrs is not None and len(period_hrs) >= 2:
-                hrs_over_time = period_hrs["hazard_ratio"].tolist()
-                weakening = hrs_over_time[-1] > hrs_over_time[0]
-
-            if sig and period_hrs is not None and not period_hrs.empty:
-                lines.append(f"**{name}** {stars_v}")
-
-                # Headline HR (reference period or 12mo)
-                headline_hr = res.get("effect")
-                headline_label = row.get("Headline_HR_Label", "")
-                if headline_hr is not None:
-                    direction = "lower" if headline_hr < 1 else "higher"
-                    pct_change = abs(1 - headline_hr) * 100
-                    lines.append(
-                        f"- **{headline_label}**: HR = **{headline_hr:.3f}** — "
-                        f"**{pct_change:.1f}% {direction} hazard of departure**."
-                    )
-
-                # Significant periods summary
-                if sig_periods:
-                    period_labels = [r["period"] for r in sig_periods]
-                    lines.append(
-                        f"- **{len(sig_periods)} of {len(period_hrs)} periods** "
-                        f"show significant treatment effects: "
-                        f"{', '.join(period_labels)}."
-                    )
-
-                # Weakening effect note (your core hypothesis)
-                if weakening:
-                    first_hr = period_hrs["hazard_ratio"].iloc[0]
-                    last_hr = period_hrs["hazard_ratio"].iloc[-1]
-                    first_period = period_hrs["period"].iloc[0]
-                    last_period = period_hrs["period"].iloc[-1]
-                    lines.append(
-                        f"- ⚠️ **Training effect weakens over time**: HR increases from "
-                        f"**{first_hr:.3f}** ({first_period}) to "
-                        f"**{last_hr:.3f}** ({last_period}), suggesting the protective "
-                        f"effect of training diminishes with time."
-                    )
-                else:
-                    first_hr = period_hrs["hazard_ratio"].iloc[0]
-                    last_hr = period_hrs["hazard_ratio"].iloc[-1]
-                    first_period = period_hrs["period"].iloc[0]
-                    last_period = period_hrs["period"].iloc[-1]
-                    lines.append(
-                        f"- ✅ **Training effect is sustained or strengthens over time**: "
-                        f"HR moves from **{first_hr:.3f}** ({first_period}) to "
-                        f"**{last_hr:.3f}** ({last_period})."
-                    )
-
-                # 12-month retention
-                if surv_t is not None and surv_c is not None and pd.notna(surv_t) and pd.notna(surv_c):
-                    lines.append(
-                        f"- Estimated 12-month retention: "
-                        f"**{surv_t*100:.1f}%** (trained) vs. "
-                        f"**{surv_c*100:.1f}%** (untrained)."
-                    )
-
-                # Event counts
-                if n_events_t is not None and n_events_c is not None:
-                    lines.append(
-                        f"- Events observed: {n_events_t} departures "
-                        f"(trained, n={n_treated}) / "
-                        f"{n_events_c} departures (untrained, n={n_control})."
-                    )
-
-                # PH test note
-                if ph_met is False:
-                    lines.append(
-                        "- ℹ️ Proportional hazards assumption flagged for treatment "
-                        "variable — expected and handled by design via time interaction terms."
-                    )
-                elif ph_met is True:
-                    lines.append(
-                        "- ✅ Proportional hazards assumption met for treatment variable."
-                    )
-
-                lines.append("")
-
-            else:
-                lines.append(f"**{name}** — *No significant effect detected*")
-                p_str = fmt_p(p_corr) if pd.notna(p_corr) else "—"
-                headline_hr = res.get("effect")
-                hr_str = f"{headline_hr:.3f}" if headline_hr is not None and pd.notna(headline_hr) else "—"
-                ns_qualifier = (
-                    "not significant"
-                    if correction == "none" or n_tests == 1
-                    else "not significant after correction"
-                )
-                lines.append(
-                    f"- Headline HR = {hr_str}, p = {p_str} ({ns_qualifier})."
-                )
-                lines.append("")
-
-        # ── How to read period-specific hazard ratios ──────────────────────────
-        lines.append("**How to read period-specific hazard ratios:**")
-        if time_interaction == "categorical":
-            lines.append(
-                "Each period's HR captures the treatment effect within that time window. "
-                "The reference period HR is the baseline treatment effect. Subsequent "
-                "period HRs reflect how the treatment effect changes relative to the "
-                "reference period — a rising HR over time indicates the protective effect "
-                "of training is weakening. HR < 1 means trained employees had a lower "
-                "instantaneous departure rate during that period."
-            )
-        else:
-            lines.append(
-                "HRs are computed at 3, 6, 9, and 12-month snapshots from a model "
-                "where the treatment effect changes linearly over time. A rising HR "
-                "over time indicates the protective effect of training is weakening "
-                "monotonically. HR < 1 means trained employees had a lower instantaneous "
-                "departure rate at that timepoint."
-            )
-        lines.append("")
-
-        # ── Snapshot validation ────────────────────────────────────────────────
-        has_snapshots = any(
-            res.get("survival_at_snapshots") is not None
-            for res in survival_results_dict.values()
-        )
-        if has_snapshots:
-            lines.append("#### Snapshot Validation (Cox vs. Observed Retention Rates)")
-            lines.append("")
-            lines.append(
-                "The table below compares IPTW-weighted Kaplan–Meier survival "
-                "probabilities at each snapshot timepoint. Close alignment between "
-                "trained and untrained groups at baseline validates the IPTW weighting."
-            )
-            lines.append("")
-            for outcome, res in survival_results_dict.items():
-                snap_df = res.get("survival_at_snapshots")
-                if snap_df is not None and not snap_df.empty:
-                    name = outcome_descriptions.get(outcome, outcome)
-                    lines.append(f"*{name}:*")
-                    lines.append("")
-                    lines.append(
-                        "| Timepoint | Days | Survival (Trained) | Survival (Untrained) | Difference |"
-                    )
-                    lines.append(
-                        "|-----------|------|--------------------|----------------------|------------|"
-                    )
-                    for _, snap_row in snap_df.iterrows():
-                        label = snap_row.get("timepoint_label", "")
-                        days = snap_row.get("timepoint_days", "")
-                        s_t = snap_row.get("survival_treated", float("nan"))
-                        s_c = snap_row.get("survival_control", float("nan"))
-                        s_diff = snap_row.get("survival_diff", float("nan"))
-                        s_t_str = f"{s_t*100:.1f}%" if pd.notna(s_t) else "—"
-                        s_c_str = f"{s_c*100:.1f}%" if pd.notna(s_c) else "—"
-                        diff_str = f"{s_diff*100:+.1f}pp" if pd.notna(s_diff) else "—"
-                        lines.append(
-                            f"| {label} | {days} | {s_t_str} | {s_c_str} | {diff_str} |"
-                        )
-                    lines.append("")
-
-        # ── Balance verification ───────────────────────────────────────────────
-        lines.append("#### Post-Weighting Balance Verification")
-        all_balanced = True
-        for outcome, res in survival_results_dict.items():
-            bal_df = res.get("balance_df")
-            if bal_df is not None and "balanced_after_weighting" in bal_df.columns:
-                n_imbal = int(bal_df["balanced_after_weighting"].eq(False).sum())
-                if n_imbal > 0:
-                    all_balanced = False
-                    name = outcome_descriptions.get(outcome, outcome)
-                    lines.append(
-                        f"- ⚠️ {name}: {n_imbal} imbalanced covariates after weighting"
-                    )
-        if all_balanced:
-            lines.append(
-                f"- ✅ All {len(survival_results_dict)} survival outcome(s) passed "
-                f"balance verification (0 imbalanced covariates)."
-            )
-            lines.append(
-                "- IPTW successfully balanced observed confounders across treatment groups."
-            )
-        lines.append("")
-
-        # ── E-value table ──────────────────────────────────────────────────────
-        if survival_evalues_df is not None and not survival_evalues_df.empty:
-            lines.append("#### E-Value Sensitivity Analysis")
-            lines.append("")
-            lines.append(
-                "> E-values computed on the hazard ratio scale (risk_ratio). "
-                "The headline HR is used — reference period for categorical "
-                "interaction models, 12-month estimate for continuous. "
-                "Larger E-values indicate greater robustness to unmeasured confounding."
-            )
-            lines.append("")
-            lines.append("| Outcome | E-Value Point | E-Value CI | Robustness |")
-            lines.append("|---------|---------------|------------|------------|")
-
-            for _, row in survival_evalues_df.iterrows():
-                outcome = row["Outcome"]
-                name = outcome_descriptions.get(outcome, outcome)
-                ev_pt = row.get("E_Value_Point")
-                ev_ci = row.get("E_Value_CI")
-                robustness = row.get("Robustness", "—")
-                sig = row.get("Significant", False)
-
-                ev_pt_str = f"{ev_pt:.2f}" if pd.notna(ev_pt) else "—"
-                ev_ci_str = f"{ev_ci:.2f}" if pd.notna(ev_ci) else "—"
-
-                if sig:
-                    lines.append(
-                        f"| {name} | **{ev_pt_str}** | **{ev_ci_str}** | {robustness} |"
-                    )
-                else:
-                    lines.append(
-                        f"| {name} | {ev_pt_str} | {ev_ci_str} | {robustness} (ns) |"
-                    )
-            lines.append("")
-
-            # Per-outcome E-value interpretations (significant only)
-            sig_ev = survival_evalues_df[
-                survival_evalues_df.get("Significant", False) == True
-            ]
-            if not sig_ev.empty:
-                lines.append("**Significant outcome interpretations:**")
-                lines.append("")
-                for _, row in sig_ev.iterrows():
-                    outcome = row["Outcome"]
-                    name = outcome_descriptions.get(outcome, outcome)
-                    interp = row.get("Interpretation", "")
-                    if pd.notna(interp) and interp:
-                        lines.append(f"- **{name}:** {interp}")
-                        lines.append("")
-
-        return "\n".join(lines)
-
-    @staticmethod
-    def generate_comparison_table(
-        ate_summary: pd.DataFrame,
-        att_summary: pd.DataFrame,
-        ate_evalues: pd.DataFrame,
-        att_evalues: pd.DataFrame,
-        ate_results: Dict[str, Dict],
-        att_results: Dict[str, Dict],
-        outcome_descriptions: Optional[Dict[str, str]] = None,
-    ) -> str:
-        """
-        Generate a Markdown ATE vs ATT comparison.
-
-        Creates side-by-side effect comparison and E-value comparison tables,
-        plus auto-generated key observations about systematic differences
-        between the two estimands.
-
-        Parameters
-        ----------
-        ate_summary : pd.DataFrame
-            Concatenation of all ATE ``build_summary_table()`` outputs.
-        att_summary : pd.DataFrame
-            Concatenation of all ATT ``build_summary_table()`` outputs.
-        ate_evalues : pd.DataFrame
-            Concatenation of all ATE ``compute_evalues_from_results()`` outputs.
-        att_evalues : pd.DataFrame
-            Concatenation of all ATT ``compute_evalues_from_results()`` outputs.
-        ate_results : Dict[str, Dict]
-            Merged ATE per-outcome ``analyze_treatment_effect()`` dicts.
-        att_results : Dict[str, Dict]
-            Merged ATT per-outcome ``analyze_treatment_effect()`` dicts.
-        outcome_descriptions : Dict[str, str], optional
-            Mapping from variable names to display-friendly names.
-
-        Returns
-        -------
-        str
-            Markdown-formatted comparison string.
-        """
-        if outcome_descriptions is None:
-            outcome_descriptions = {}
-
-        lines: list = []
-
-        # ── Side-by-side effect comparison ─────────────────────────────
-        lines.append("### Side-by-Side Comparison")
-        lines.append("")
-        lines.append("| Outcome | ATE | ATT | Difference |")
-        lines.append("|---------|-----|-----|------------|")
-
-        for _, ate_row in ate_summary.iterrows():
-            outcome = ate_row["Outcome"]
-            name = outcome_descriptions.get(outcome, outcome)
-
-            att_match = att_summary[att_summary["Outcome"] == outcome]
-            if att_match.empty:
-                continue
-            att_row = att_match.iloc[0]
-
-            is_binary = ate_results.get(outcome, {}).get("outcome_type") == "binary"
-
-            if is_binary:
-                ate_or = np.exp(ate_row["Effect"])
-                att_or = np.exp(att_row["Effect"])
-                direction = "larger" if att_or > ate_or else "smaller"
-                lines.append(
-                    f"| **{name}** (OR) | {ate_or:.2f} | {att_or:.2f} | ATT {direction} |"
-                )
-            else:
-                ate_eff = ate_row["Effect"]
-                att_eff = att_row["Effect"]
-                ate_d = ate_row.get("Cohens_d")
-                att_d = att_row.get("Cohens_d")
-                ate_sig = ate_row["Significant"]
-                att_sig = att_row["Significant"]
-
-                ate_d_str = f" (Cohen's d = {ate_d:.2f})" if pd.notna(ate_d) else ""
-                att_d_str = f" (Cohen's d = {att_d:.2f})" if pd.notna(att_d) else ""
-                ate_ns = " (ns)" if not ate_sig else ""
-                att_ns = " (ns)" if not att_sig else ""
-
-                direction = (
-                    "slightly larger" if abs(att_eff) > abs(ate_eff) else "slightly smaller"
-                )
-                lines.append(
-                    f"| **{name}** | {ate_eff:+.2f}{ate_d_str}{ate_ns} | "
-                    f"{att_eff:+.2f}{att_d_str}{att_ns} | ATT {direction} |"
-                )
-
-        lines.append("")
-
-        # ── Key observations (auto-generated) ──────────────────────────
-        lines.append("### Key Observations")
-        lines.append("")
-
-        att_larger_count = 0
-        total_sig = 0
-        for _, ate_row in ate_summary.iterrows():
-            outcome = ate_row["Outcome"]
-            att_match = att_summary[att_summary["Outcome"] == outcome]
-            if att_match.empty:
-                continue
-            att_row = att_match.iloc[0]
-            if ate_row["Significant"] or att_row["Significant"]:
-                total_sig += 1
-                is_binary = ate_results.get(outcome, {}).get("outcome_type") == "binary"
-                if is_binary:
-                    if np.exp(att_row["Effect"]) > np.exp(ate_row["Effect"]):
-                        att_larger_count += 1
-                else:
-                    if abs(att_row["Effect"]) > abs(ate_row["Effect"]):
-                        att_larger_count += 1
-
-        observation_num = 1
-        if total_sig > 0 and att_larger_count == total_sig:
-            lines.append(
-                f"{observation_num}. **ATT effects are consistently larger** across all "
-                f"significant outcomes, suggesting positive selection or treatment "
-                f"effect heterogeneity: managers who received training benefited more "
-                f"than the average manager in the population would have."
-            )
-            lines.append("")
-            observation_num += 1
-
-        # Check whether binary gap > continuous gap
-        binary_outcomes = [
-            o for o in ate_results if ate_results[o].get("outcome_type") == "binary"
-        ]
-        continuous_outcomes = [
-            o for o in ate_results if ate_results[o].get("outcome_type") == "continuous"
-        ]
-
-        if binary_outcomes and continuous_outcomes:
-            binary_gaps = []
-            for o in binary_outcomes:
-                ate_m = ate_summary[ate_summary["Outcome"] == o]
-                att_m = att_summary[att_summary["Outcome"] == o]
-                if not ate_m.empty and not att_m.empty:
-                    ate_or = np.exp(ate_m.iloc[0]["Effect"])
-                    att_or = np.exp(att_m.iloc[0]["Effect"])
-                    if ate_or > 0:
-                        binary_gaps.append(((att_or - ate_or) / ate_or) * 100)
-
-            cont_gaps = []
-            for o in continuous_outcomes:
-                ate_m = ate_summary[ate_summary["Outcome"] == o]
-                att_m = att_summary[att_summary["Outcome"] == o]
-                if not ate_m.empty and not att_m.empty:
-                    ate_eff = ate_m.iloc[0]["Effect"]
-                    att_eff = att_m.iloc[0]["Effect"]
-                    if abs(ate_eff) > 0.01:
-                        cont_gaps.append(abs((att_eff - ate_eff) / ate_eff) * 100)
-
-            if binary_gaps and cont_gaps:
-                avg_binary_gap = np.mean(np.abs(binary_gaps))
-                avg_cont_gap = np.mean(cont_gaps)
-                if avg_binary_gap > avg_cont_gap:
-                    lines.append(
-                        f"{observation_num}. **The ATE\u2013ATT gap is most pronounced for "
-                        f"retention (binary) outcomes**, suggesting the training's impact "
-                        f"on behavioral outcomes varies more by who receives it than its "
-                        f"impact on self-reported attitudes."
-                    )
-                    lines.append("")
-                    observation_num += 1
-
-        lines.append(
-            f"{observation_num}. **Both estimands tell the same qualitative story**: "
-            f"the direction and significance pattern is consistent across ATE and ATT "
-            f"for all outcomes."
-        )
-        lines.append("")
-
-        # ── E-value comparison ─────────────────────────────────────────
-        lines.append("### E-Value Comparison")
-        lines.append("")
-        lines.append("| Outcome | ATE E-Value | ATT E-Value | Difference |")
-        lines.append("|---------|-------------|-------------|------------|")
-
-        for _, ate_ev in ate_evalues.iterrows():
-            outcome = ate_ev["Outcome"]
-            name = outcome_descriptions.get(outcome, outcome)
-            ate_sig = ate_ev.get("Significant", False)
-
-            att_match = att_evalues[att_evalues["Outcome"] == outcome]
-            if att_match.empty:
-                continue
-            att_ev_row = att_match.iloc[0]
-            att_sig = att_ev_row.get("Significant", False)
-
-            if not ate_sig and not att_sig:
-                continue
-
-            ate_pt = ate_ev["E_Value_Point"]
-            att_pt = att_ev_row["E_Value_Point"]
-            diff = att_pt - ate_pt
-
-            if diff > 0.15:
-                desc = "ATT notably more robust"
-            elif diff > 0.05:
-                desc = "ATT marginally more robust"
-            elif diff < -0.15:
-                desc = "ATE notably more robust"
-            elif diff < -0.05:
-                desc = "ATE marginally more robust"
-            else:
-                desc = "Similar robustness"
-
-            lines.append(f"| **{name}** | {ate_pt:.2f} | {att_pt:.2f} | {desc} |")
-
-        lines.append("")
-
-        return "\n".join(lines)
-
-
-# Backward-compatibility alias
-IPTWGEEModel = CausalInferenceModel
