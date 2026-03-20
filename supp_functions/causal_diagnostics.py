@@ -398,8 +398,8 @@ class CausalDiagnostics:
         _print("CHECK 1D: Baseline Outcome Variables (Pre-treatment Levels)")
         _print("-" * 80)
         _print("  ⚠️  Imbalance on baseline outcomes is particularly concerning!")
-        _print("     It suggests selection on trajectory "
-            "(people who were already changing).\n")
+        _print("     It suggests selection on pre-treatment level "
+            "(groups differed before treatment).\n")
 
         for var in baseline_vars:
             if var not in data.columns:
@@ -423,9 +423,9 @@ class CausalDiagnostics:
 
             if abs_smd >= thresh['smd_severe']:
                 flag = "🚨 SEVERE"
-                interpretation = "← Strong selection on pre-treatment trajectory!"
+                interpretation = "← Strong selection on pre-treatment levels!"
                 imbalance_details.append(
-                    f"{var} (BASELINE): SMD={smd:.3f} (severe - selection on trajectory)")
+                    f"{var} (BASELINE): SMD={smd:.3f} (severe - selection on pre-treatment levels)")
             elif abs_smd >= thresh['smd_moderate']:
                 flag = "⚠️  MODERATE"
                 interpretation = "← Moderate selection on pre-treatment level"
@@ -987,6 +987,11 @@ class CausalDiagnostics:
         Returns:
             pd.DataFrame with columns: Variable, Type, VIF/GVIF, Adjusted (GVIF^1/2df), 
             Shared Variance, Severity.
+
+        Note:
+            VIF assesses multicollinearity (variance inflation among predictors),
+            not covariate overlap. High VIF does not indicate poor treatment-control
+            balance. Use check_covariate_overlap for overlap diagnostics.
         """
         # --- Input validation ---
         if exclude_vars is None:
@@ -1362,7 +1367,7 @@ class CausalDiagnostics:
     Checking PS overlap = checking overlap in the FULL multivariate space.
 
     NOTE: Baseline outcome variables are INCLUDED in the PS model to capture
-            selection on pre-treatment levels and trajectories.
+            selection on pre-treatment levels.
         """)
 
         mv_results = self._check_multivariate_overlap(
@@ -2042,11 +2047,11 @@ class CausalDiagnostics:
         ax.hist(ps_treated, bins=30, alpha=0.5, label='Treated',
                 density=True, color='red', edgecolor='black')
 
-        overlap_min = max(ps_treated.min(), ps_control.min())
-        overlap_max = min(ps_treated.max(), ps_control.max())
+        overlap_min = max(np.percentile(ps_treated, 2.5), np.percentile(ps_control, 2.5))
+        overlap_max = min(np.percentile(ps_treated, 97.5), np.percentile(ps_control, 97.5))
 
         ax.axvline(overlap_min, color='green', linestyle='--', linewidth=2,
-                label=f'Common support: [{overlap_min:.3f}, {overlap_max:.3f}]')
+                label=f'Common support (2.5-97.5%): [{overlap_min:.3f}, {overlap_max:.3f}]')
         ax.axvline(overlap_max, color='green', linestyle='--', linewidth=2)
         ax.axvspan(overlap_min, overlap_max, alpha=0.1, color='green')
 
@@ -2060,7 +2065,8 @@ class CausalDiagnostics:
         fig.text(
             0.5,
             0.01,
-            'Interpretation: better overlap between treated and control score distributions indicates more credible causal comparison.',
+            'Interpretation: better overlap between treated and control score distributions indicates more credible causal comparison. '
+            'Common support uses 2.5th-97.5th percentile bounds (matches overlap diagnostics).',
             ha='center',
             va='bottom',
             fontsize=9,
@@ -2276,16 +2282,17 @@ class CausalDiagnostics:
     ║  WHAT THE METRICS MEAN                                                       ║
     ╠══════════════════════════════════════════════════════════════════════════════╣
     ║                                                                              ║
-    ║  STANDARDIZED MEAN DIFFERENCE (SMD):                                         ║
+    ║  STANDARDIZED MEAN DIFFERENCE (SMD): (Austin, 2009)                          ║
     ║    How different are group means, in standard deviation units?               ║
     ║    < 0.10 = negligible    0.10-0.25 = small    0.25-0.50 = medium            ║
     ║          > 0.50 = large                                                      ║
-    ║    Rule: SMD > 0.25 on important confounders → residual bias likely          ║
+    ║    Rule: SMD>0.25 on key confounders → bias possible; magnitude varies by    ║
+    ║    outcome-covariate relationships                                          ║
     ║                                                                              ║
     ║  SEPARABILITY AUC:                                                           ║
     ║    How well can we predict treatment from covariates?                        ║
     ║    0.5 = random (groups identical)    1.0 = perfect separation               ║
-    ║    Rule: AUC > 0.85 → groups are so different that overlap is minimal        ║
+    ║    Rule: AUC>0.8 = substantial group differences; AUC>0.9 = minimal overlap  ║
     ║                                                                              ║
     ║  CONTROLS IN OVERLAP:                                                        ║
     ║    What % of controls have propensity scores in the treated range?           ║
@@ -2302,16 +2309,17 @@ class CausalDiagnostics:
     ║                                                                              ║
     ║  GOOD OVERLAP (AUC < 0.7, most SMD < 0.25):                                  ║
     ║    → Proceed with confidence                                                 ║
-    ║    → All methods (OLS, ML, PSM, IPW) should give similar results             ║
+    ║    → OLS, PSM, IPW often give similar results when overlap good and models   ║
+    ║      reasonably specified                                                     ║
     ║    → Report ATE or ATT as appropriate                                        ║
     ║                                                                              ║
-    ║  MODERATE CONCERNS (AUC 0.7-0.85, some SMD > 0.25):                          ║
+    ║  MODERATE CONCERNS (AUC 0.7-0.8, some SMD > 0.25):                          ║
     ║    → Proceed with caution                                                    ║
     ║    → Prefer OLS over ML (better extrapolation)                               ║
     ║    → Compare OLS with PSM — if they differ, report range                     ║
     ║    → Acknowledge uncertainty in the report                                   ║
     ║                                                                              ║
-    ║  SERIOUS CONCERNS (AUC > 0.85, many SMD > 0.5):                              ║
+    ║  SERIOUS CONCERNS (AUC > 0.8, many SMD > 0.5):                               ║
     ║    → Full sample causal inference may not be appropriate                     ║
     ║    → RECOMMENDED: Estimate ATT on matched subset only                        ║
     ║       • Use PSM to find matchable treated units (may be 30-70% of sample)    ║
@@ -2378,6 +2386,7 @@ class CausalDiagnostics:
         2. check_vif(df, controls, treatment=None, exclude_vars=None)
         Variance Inflation Factor for multicollinearity detection.
         Returns pd.DataFrame with Variable, VIF, Shared Variance.
+        (VIF = multicollinearity only; use overlap diagnostics for balance.)
 
         3. show_low_proportion_groups(df, treatment, treatment_type='categorical',
                                     threshold=0.05, exclude_vars=None,
