@@ -947,7 +947,9 @@ class CausalInferenceModel:
             Results dictionary with:
             - period_hrs         : DataFrame of HR, CI, p-value per period
                                 (categorical) or per snapshot timepoint
-                                (continuous).
+                                (continuous). For categorical interaction,
+                                timepoint_days is the period end; reference-period
+                                HR applies to the full first interval.
             - time_interaction   : str, the interaction type used.
             - concordance        : float, concordance index of fitted model.
             - ph_test_results    : DataFrame of PH test results with note.
@@ -1134,10 +1136,12 @@ class CausalInferenceModel:
         print("\n--- Proportional Hazards Test ---")
         print(
             "NOTE: This model includes time interaction terms that explicitly\n"
-            "      account for a non-constant treatment effect over time.\n"
-            "      A PH violation for the treatment variable is therefore\n"
-            "      expected and handled by design — it does not invalidate\n"
-            "      the model. Results are reported for transparency only."
+            "      account for a non-constant treatment effect over time. The\n"
+            "      'expected violation' applies to the treatment variable (and\n"
+            "      its time interactions) only — it does not invalidate the model.\n"
+            "      Violations for other covariates still warrant attention.\n"
+            "      Interpret covariate PH results; violations in confounders may\n"
+            "      bias effect estimates. Results are reported for transparency."
         )
 
         try:
@@ -1245,7 +1249,7 @@ class CausalInferenceModel:
                 "p_value": round(p_ref, 4),
                 "log_hr": round(beta_treat, 4),
                 "se_log_hr": round(se_treat, 4),
-                "note": "reference period",
+                "note": "reference period (timepoint_days = period end)",
             })
 
             # Subsequent periods: treatment + interaction term
@@ -1424,7 +1428,8 @@ class CausalInferenceModel:
         treatment_var: str,
         weight_col: str = "iptw",
         estimand: str = "ATE",
-        title: str = "IPTW Weight Distribution"
+        title: str = "IPTW Weight Distribution",
+        stabilized: bool = True
     ) -> object:
         """
         Create histogram of IPTW weights by treatment group.
@@ -1441,6 +1446,8 @@ class CausalInferenceModel:
             Name of the weight column
         title : str, default="IPTW Weight Distribution"
             Plot title
+        stabilized : bool, default=True
+            If True, interpretation text assumes stabilized weights (default pipeline).
         
         Returns
         -------
@@ -1467,16 +1474,16 @@ class CausalInferenceModel:
         plt.suptitle(title, fontsize=14, fontweight="bold")
         if estimand == "ATT":
             interpretation = (
-                "Interpretation (ATT): Treated weights should be exactly 1.0. "
-                "Control weights are scaled by the marginal treatment probability — "
-                "expect mean ≈ P(T=1) with most values near zero and a small right tail "
-                "for controls resembling treated individuals."
+                "Stabilized ATT: Treated weights = 1.0. Control weights are scaled by "
+                "the marginal treatment probability — expect mean ≈ P(T=1) with most "
+                "values near zero and a small right tail for controls resembling "
+                "treated individuals."
             )
         else:  # ATE
             interpretation = (
                 "Interpretation (ATE): Look for stabilized weights with mean near 1 "
-                "and few extreme right-tail values, since large tails indicate unstable "
-                "IPTW estimates."
+                "and few extreme right-tail values. Max weight > 10 or P99 ≫ mean "
+                "suggests instability."
             )
 
         fig.text(0.5, 0.01, interpretation, ha="center", va="bottom", fontsize=9, color="dimgray")
@@ -1984,6 +1991,19 @@ class CausalInferenceModel:
                 f"likely insufficient data: {e}"
             )
 
+        # --- Weight diagnostic warnings ---
+        if weight_stats["max_weight"] > 10:
+            print(
+                f"  ⚠️  Max weight {weight_stats['max_weight']:.1f} > 10 — "
+                "consider stricter trimming or overlap restriction."
+            )
+        ess_ratio = weight_stats["effective_sample_size"] / weight_stats["n_observations"]
+        if ess_ratio < 0.5:
+            print(
+                f"  Note: ESS is <50% of n (ratio={ess_ratio:.2f}) — "
+                "weights may be unstable."
+            )
+
         # --- Weight distribution plot ---
         weight_dist_fig = None
         if plot_weights:
@@ -2073,9 +2093,21 @@ class CausalInferenceModel:
                     f"covariates balanced (|SMD| < 0.1)"
                 )
             else:
+                imbalanced_vars = balance_df[
+                    balance_df["balanced_after_weighting"] == False
+                ]["variable"].tolist()
+                display_vars = imbalanced_vars[:10]
+                vars_str = ", ".join(display_vars)
+                if len(imbalanced_vars) > 10:
+                    vars_str += f" … and {len(imbalanced_vars) - 10} more"
                 print(
                     f"  ⚠️  Post-weighting balance: {n_imbalanced} of "
                     f"{n_total_vars} covariates still imbalanced (|SMD| ≥ 0.1)"
+                )
+                print(f"      Variables: {vars_str}")
+                print(
+                    "      Consider improving the propensity model, adding covariates, "
+                    "or reporting sensitivity analyses."
                 )
 
         return {
@@ -2136,7 +2168,7 @@ class CausalInferenceModel:
         3. Propensity score overlap visualization
         4. Weight diagnostics, distribution visualization, and balance assessment
         5. Doubly robust outcome modeling via weighted GEE
-        6. Effect size metrics (Cohen's d, percent change)
+        6. Effect size metrics (IPTW-weighted Cohen's d, percent change)
         7. Optional export to Excel workbook
 
         **IMPORTANT: Multiple Testing Correction**
@@ -2190,7 +2222,8 @@ class CausalInferenceModel:
             - p_value: RAW p-value for the treatment effect (uncorrected)
             - significant: Boolean indicating significance at alpha (raw, uncorrected)
             - alpha: Significance level used
-            - cohens_d: Cohen's d effect size (uses raw weighted mean diff)
+            - cohens_d: IPTW-weighted Cohen's d (uses raw weighted mean diff).
+              Conventional benchmarks (0.2/0.5/0.8) may not apply directly.
             - pct_change: Percent change relative to control group mean
             - mean_treatment: Weighted mean outcome for treated group
             - mean_control: Weighted mean outcome for control group
@@ -2294,8 +2327,8 @@ class CausalInferenceModel:
         p_value_raw = gee_res.pvalues[treatment_var]
         
         # --- Effect size metrics ---
-        # Cohen's d uses the raw weighted mean difference (not the conditional
-        # GEE coefficient) divided by the weighted marginal pooled SD.
+        # IPTW-weighted Cohen's d uses the raw weighted mean difference (not the
+        # conditional GEE coefficient) divided by the weighted marginal pooled SD.
         treated_df = df[df[treatment_var] == 1]
         control_df = df[df[treatment_var] == 0]
         
@@ -2345,7 +2378,7 @@ class CausalInferenceModel:
             f"  [{outcome_var}] {estimand} = {effect:.4f} "
             f"({ci_pct}% CI: [{ci[0]:.4f}, {ci[1]:.4f}]), "
             f"p = {p_value_raw:.4f} {stars}, "
-            f"Cohen's d = {cohens_d:.4f}"
+            f"IPTW-weighted Cohen's d = {cohens_d:.4f}"
         )
         
         # --- Build propensity score model summary DataFrame ---
@@ -2905,7 +2938,7 @@ class CausalInferenceModel:
             primary_ci = (0.0, 0.0)
             print("  Warning: No treatment effect could be estimated.")
 
-        # Cohen's d from raw difference / pooled SD
+        # Cohen's d (raw, unweighted) from mean difference / pooled SD
         raw_diff = mean_treatment - mean_control
         var_treated = Y[T == 1].var()
         var_control = Y[T == 0].var()
@@ -3228,7 +3261,9 @@ class CausalInferenceModel:
             - weighted_df: processed data with weights
 
             Plus survival-specific keys:
-            - period_hrs: DataFrame with HR, CI, p-value per period/timepoint
+            - period_hrs: DataFrame with HR, CI, p-value per period/timepoint.
+              For categorical time interaction, timepoint_days is the end of each
+              period; the reference-period HR applies to the full first interval.
             - time_interaction: "categorical" or "continuous"
             - ph_test_results: DataFrame of PH test results with explanatory note
             - ph_assumption_met: proportional hazards test result for treatment
@@ -3537,7 +3572,7 @@ class CausalInferenceModel:
             Upper bound of confidence interval (same scale as effect)
         effect_type : str, default="cohens_d"
             Type of effect measure provided. One of:
-            - "cohens_d": Converts to approximate RR using VanderWeele formula
+            - "cohens_d": Converts to approximate RR using Chinn (2000) formula
             - "odds_ratio": Uses OR directly (or converts if outcome_rare=False)
             - "risk_ratio": Uses RR directly
             - "log_odds": Exponentiates to OR, then processes as odds_ratio
@@ -3561,6 +3596,9 @@ class CausalInferenceModel:
         ----------
         VanderWeele TJ, Ding P. Sensitivity Analysis in Observational Research:
         Introducing the E-Value. Ann Intern Med. 2017;167(4):268-274.
+        Chinn S. A simple method for converting an odds ratio to effect size for
+        use in meta-analysis. Stat Med. 2000;19(22):3127-3131. (Cohen's d to RR
+        approximation: RR ≈ exp(0.91 * d).)
         """
         valid_types = ["cohens_d", "odds_ratio", "risk_ratio", "log_odds"]
         if effect_type not in valid_types:
@@ -3576,8 +3614,9 @@ class CausalInferenceModel:
         
         def _cohens_d_to_rr(d: float) -> float:
             """
-            Convert Cohen's d to approximate risk ratio.
-            Uses VanderWeele (2017) formula: RR ≈ exp(0.91 * d)
+            Convert Cohen's d to approximate risk ratio (Chinn 2000).
+            RR ≈ exp(0.91 * d). For continuous outcomes, this is approximate;
+            E-values interpret confounding strength on a RR scale metaphorically.
             """
             return np.exp(0.91 * abs(d))
         
@@ -3661,6 +3700,11 @@ class CausalInferenceModel:
             interpretation += (
                 f" The E-value for the confidence interval bound is {evalue_ci:.2f}, meaning "
                 f"a confounder of this strength could shift the CI to include the null."
+            )
+        if effect_type == "cohens_d":
+            interpretation += (
+                " For continuous outcomes, E-value uses an approximate RR conversion; "
+                "interpretation is approximate."
             )
         
         return {
@@ -3794,6 +3838,8 @@ class CausalInferenceModel:
         print("    E-value 2.0-3.0: Moderate robustness")
         print("    E-value 1.5-2.0: Weak robustness - interpret with caution")
         print("    E-value < 1.5 : Very weak - easily explained by confounding")
+        print("    (Thresholds are heuristic; true RR-scale effects have more precise")
+        print("     interpretations than approximate conversions from Cohen's d.)")
         print("=" * 70)
         
         # Print per-outcome interpretations for significant results
@@ -4014,6 +4060,8 @@ class CausalInferenceModel:
         print(display_df.to_string(index=False))
         print(f"{'=' * 60}")
         print("  Significance: *** p<0.001, ** p<0.01, * p<0.05")
+        if "Cohens_d" in summary_df.columns:
+            print("  Cohens_d: IPTW-weighted Cohen's d (from analyze_treatment_effect)")
         print(f"  Correction: {correction_method} across {len(rows)} outcomes")
         print()
         
