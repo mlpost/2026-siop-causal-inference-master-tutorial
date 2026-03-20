@@ -154,6 +154,53 @@ def _show_development_disclaimer():
         _DISCLAIMER_SHOWN = True
 
 
+def _expand_to_person_period(
+    df: pd.DataFrame,
+    time_var: str,
+    event_var: str,
+    period_breaks: List[int],
+    period_labels: List[str],
+    period_col: str = "_period",
+) -> pd.DataFrame:
+    """
+    Expand survival data to person-period format for categorical time interaction.
+
+    Each person contributes one row per period they were at risk. Used by
+    _fit_cox_model when time_interaction="categorical".
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Data with time_var and event_var.
+    time_var : str
+        Name of time column (days to event/censoring).
+    event_var : str
+        Name of event indicator column.
+    period_breaks : list of int
+        Breakpoints in days, e.g. [0, 90, 180, 270, 365].
+    period_labels : list of str
+        Labels for each period.
+    period_col : str, default="_period"
+        Column name for the period label.
+
+    Returns
+    -------
+    pd.DataFrame
+        Expanded DataFrame with one row per person-period.
+    """
+    period_dfs = []
+    for i, (t_start, t_end) in enumerate(zip(period_breaks[:-1], period_breaks[1:])):
+        at_risk = df[df[time_var] > t_start].copy()
+        at_risk[event_var] = (
+            (at_risk[event_var] == 1)
+            & (at_risk[time_var] > t_start)
+            & (at_risk[time_var] <= t_end)
+        ).astype(int)
+        at_risk[period_col] = period_labels[i]
+        period_dfs.append(at_risk)
+    return pd.concat(period_dfs, ignore_index=True)
+
+
 class CausalInferenceModel:
     """
     Unified causal inference toolkit for treatment effect estimation.
@@ -1005,37 +1052,9 @@ class CausalInferenceModel:
             # EXPAND TO PERSON-PERIOD FORMAT
             # ============================================================
             # Each person contributes one row per period they were at risk
-            
-            def expand_to_person_period(df, time_var, event_var, period_breaks, period_labels):
-                """
-                Vectorized expansion to person-period format.
-                Each person contributes one row per period they were at risk.
-                """
-                # Build one DataFrame per period, then concatenate
-                period_dfs = []
-                
-                for i, (t_start, t_end) in enumerate(
-                    zip(period_breaks[:-1], period_breaks[1:])
-                ):
-                    # Only include people who were at risk at the START of this period
-                    # i.e., their observed time is > t_start
-                    at_risk = df[df[time_var] > t_start].copy()
-                    
-                    # Event = 1 only if they departed WITHIN this period
-                    at_risk[event_var] = (
-                        (at_risk[event_var] == 1) & 
-                        (at_risk[time_var] > t_start) & 
-                        (at_risk[time_var] <= t_end)
-                    ).astype(int)
-                    
-                    at_risk[period_col] = period_labels[i]
-                    period_dfs.append(at_risk)
-                
-                return pd.concat(period_dfs, ignore_index=True)
-            
             print("Expanding to person-period format...")
-            working = expand_to_person_period(
-                working, time_var, event_var, period_breaks, period_labels
+            working = _expand_to_person_period(
+                working, time_var, event_var, period_breaks, period_labels, period_col
             )
             print(f"  Expanded from {len(data)} persons to {len(working)} person-periods")
             
@@ -2330,13 +2349,8 @@ class CausalInferenceModel:
         )
         
         # --- Build propensity score model summary DataFrame ---
-        ps_summary_df = pd.DataFrame({
-            'Parameter': ps_model.params.index,
-            'Estimate': ps_model.params.values,
-            'Std_Error': ps_model.bse.values,
-            'P_Value': ps_model.pvalues.values
-        })
-        
+        ps_summary_df = self._build_ps_summary_df(ps_model)
+
         # ------------------------------------------------------------------
         # Step 4: Export (optional)
         # ------------------------------------------------------------------
@@ -3399,12 +3413,7 @@ class CausalInferenceModel:
         })
 
         # --- Build propensity score model summary DataFrame ---
-        ps_summary_df = pd.DataFrame({
-            "Parameter": ps_model.params.index,
-            "Estimate": ps_model.params.values,
-            "Std_Error": ps_model.bse.values,
-            "P_Value": ps_model.pvalues.values,
-        })
+        ps_summary_df = self._build_ps_summary_df(ps_model)
 
         # ------------------------------------------------------------------
         # STEP 5: Export (optional)
@@ -3853,7 +3862,30 @@ class CausalInferenceModel:
         elif p_value < 0.05:
             return "*"
         return ""
-    
+
+    @staticmethod
+    def _build_ps_summary_df(ps_model) -> pd.DataFrame:
+        """
+        Build a DataFrame summary of propensity score model coefficients.
+
+        Parameters
+        ----------
+        ps_model : fitted model
+            Propensity score model with params, bse, pvalues attributes
+            (e.g. statsmodels GEE or LogisticRegression).
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with columns: Parameter, Estimate, Std_Error, P_Value.
+        """
+        return pd.DataFrame({
+            "Parameter": ps_model.params.index,
+            "Estimate": ps_model.params.values,
+            "Std_Error": ps_model.bse.values,
+            "P_Value": ps_model.pvalues.values,
+        })
+
     @staticmethod
     def build_summary_table(
         results_dict: Dict[str, Dict],
