@@ -4,7 +4,7 @@
 
 This is a **workshop/tutorial codebase** for teaching causal inference methods applied to HR/people analytics. It evaluates a leadership development program's causal impact on manager outcomes using observational (non-randomized) data. The primary audience is I/O psychology practitioners at SIOP 2026.
 
-**Core workflow:** Generate synthetic data → Run diagnostics → Estimate treatment effects via IPTW + doubly robust GEE (survey outcomes) and IPTW + Piecewise Cox PH (retention/survival outcomes) → Sensitivity analysis → Optional HTE exploration via Double Machine Learning.
+**Core workflow:** Generate synthetic data → Run diagnostics → Estimate treatment effects via IPTW + covariate-adjusted GEE (survey outcomes) and IPTW + Piecewise Cox PH plus RMST (retention/survival outcomes) → Sensitivity analysis → Optional HTE exploration via Double Machine Learning.
 
 ## Architecture
 
@@ -13,7 +13,7 @@ This is a **workshop/tutorial codebase** for teaching causal inference methods a
 | `s2_generate_data.py` | Deterministic synthetic data generator (seed=42). Produces manager-level CSV + Excel descriptives. Run standalone to regenerate `data/`. |
 | `scenario2_workshop.ipynb` | Main teaching notebook. Walks through the full causal inference pipeline interactively. |
 | `supp_functions/causal_diagnostics.py` | `CausalDiagnostics` class — pre-modeling checks (VIF, intercorrelations, overlap), covariate balance (SMD), propensity score visualization. |
-| `supp_functions/causal_inference_modelling.py` | `CausalInferenceModel` class (aliased as `IPTWGEEModel` for backward compatibility) — three approaches: (1) IPTW + doubly robust GEE for continuous/binary outcomes, (2) IPTW + Cox PH with time interaction for time-to-event survival outcomes via `lifelines`, (3) Double Machine Learning (DML) via `econml` for ATE/ATT/CATE estimation. Also includes E-value sensitivity, RMST, Markdown report generation, and summary tables. Shared IPTW infrastructure is factored into `_prepare_iptw_data()`. Module has a comprehensive docstring cataloguing all public methods by category. |
+| `supp_functions/causal_inference_modelling.py` | `CausalInferenceModel` class (aliased as `IPTWGEEModel` for backward compatibility) — three approaches: (1) IPTW + covariate-adjusted GEE for continuous/binary outcomes, (2) IPTW + Cox PH with time interaction for time-to-event survival outcomes via `lifelines`, (3) Double Machine Learning using `doubleml` for cluster-robust ATE robustness checks and `econml` for CATE exploration. Also includes E-value sensitivity, RMST, Markdown report generation, and summary tables. Shared IPTW infrastructure is factored into `_prepare_iptw_data()`. Module has a comprehensive docstring cataloguing all public methods by category. |
 | `data/s2_manager_data.csv` | Pre-generated manager-level dataset (9000 rows). |
 | `pregenereated_results/s2/` | Reference diagnostic outputs for comparison. |
 | `results/` | Output directory for workshop-generated results (Excel, plots). |
@@ -37,7 +37,7 @@ The notebook runs two distinct outcome families, then optional HTE exploration:
 
 **Survey outcomes (continuous):** `manager_efficacy_index`, `workload_index_mgr`, `turnover_intention_index_mgr`
 1. **Pre-modeling diagnostics** — `cd.check_vif()`, `cd.check_high_intercorrelations()`, `cd.run_overlap_diagnostics()`
-2. **IPTW + GEE** — `causal_model.analyze_treatment_effect()` (propensity scoring → weight estimation → balance check → doubly robust GEE)
+2. **IPTW + GEE** — `causal_model.analyze_treatment_effect()` (propensity scoring → weight estimation → balance check → covariate-adjusted GEE)
 3. **Summary** — `CausalInferenceModel.build_summary_table(results_dict)` applies FDR correction
 4. **Balance verification** — notebook-defined `verify_balance()` for independent post-weighting checks
 5. **Sensitivity** — `CausalInferenceModel.compute_evalues_from_results(results_dict, effect_type="cohens_d")`
@@ -55,10 +55,11 @@ Both ATE and ATT are run for survey outcomes; results are compared via `CausalIn
 7. **Preserve** — results saved as `ate_survival_results`, `ate_survival_summary`, `ate_survival_evalues`
 8. **Report** — `CausalInferenceModel.generate_survival_summary_report(survival_plot_fig=survival_fig)` renders Markdown technical summary with optional inline KM figure
 
-Note: `CausalInferenceModel.compute_rmst_difference()` is available for business-friendly "additional days retained" but is not called in the current notebook pipeline.
+Note: `CausalInferenceModel.compute_rmst_difference()` is now available to quantify business-friendly "additional days retained" and should be used in the retention section when updating the notebook.
 
 **HTE exploration (optional):**
-- `causal_model.dml_estimate_treatment_effects(estimand="ATE", estimate="both")` — runs both Linear DML (ATE validation) and Causal Forest DML (CATE exploration) on significant survey outcomes (currently only `manager_efficacy_index`)
+- `causal_model.dml_cluster_robust_ate(...)` — runs DoubleML PLR with cluster-aware cross-fitting as the ATE robustness check
+- `causal_model.dml_estimate_treatment_effects(estimand="ATE", estimate="CATE")` — runs econml Causal Forest DML for CATE exploration on significant survey outcomes (currently only `manager_efficacy_index`)
 - Baseline variable for the outcome (e.g., `baseline_manager_efficacy`) is appended to `continuous_vars` for HTE estimation
 
 ### `CausalDiagnostics` method groups
@@ -88,7 +89,7 @@ Configurable thresholds for SMD and AUC severity are stored in `self.overlap_thr
   - `categorical_vars`: `organization`, `job_level`, `performance_rating`
   - `binary_vars`: `gender`, `is_people_manager`, `is_new_manager`
   - `continuous_vars`: `age`, `tenure_months`, `num_direct_reports`, `tot_span_of_control`
-- Baseline (prior-year) variables prefixed with `baseline_` — included in GEE outcome model (doubly robust) but **excluded** from propensity score model
+- Baseline (prior-year) variables prefixed with `baseline_` — included in the GEE outcome model for covariate adjustment but **excluded** from propensity score model
 - Survey outcome variables: `manager_efficacy_index`, `workload_index_mgr`, `turnover_intention_index_mgr`
 - Retention is analyzed via survival analysis using `exit_date` → `days_observed` + `departed` (not the binary `retention_Xmonth` flags)
 - `outcome_descriptions` dict maps variable names to display-friendly labels
@@ -100,7 +101,7 @@ The class uses a **shared IPTW pipeline** via `_prepare_iptw_data()` (~300 lines
 Key building-block methods (also usable standalone):
 - `estimate_propensity_weights()` — fit PS model, compute stabilized IPTW weights
 - `compute_weight_diagnostics()` — ESS computation + weight summary stats
-- `fit_doubly_robust_model()` — IPTW-weighted GEE with covariate adjustment
+- `fit_iptw_outcome_model()` — IPTW-weighted GEE with covariate adjustment
 - `plot_propensity_overlap()` — PS overlap density plot (delegates to `CausalDiagnostics`)
 - `plot_weight_distribution()` — histogram of IPTW weights by treatment group
 - `plot_survival_curves()` — IPTW-weighted KM curves with risk table + HR annotation
@@ -115,7 +116,7 @@ Cox PH internals:
 ### Estimand choice
 Both ATE and ATT are supported across both analysis approaches:
 - **IPTW/GEE:** The estimand changes the IPTW weight formula, not the GEE model itself. Pass `estimand="ATE"` or `estimand="ATT"` to `analyze_treatment_effect()`.
-- **DML:** Pass `estimand="ATE"`, `"ATT"`, or `"both"` to `dml_estimate_treatment_effects()`. ATE is estimated directly; ATT is derived by averaging CATE estimates over treated observations (valid under unconfoundedness). When DML fits a constant effect (no X), ATE = ATT by construction.
+- **DML:** Use `dml_cluster_robust_ate()` for the cluster-robust ATE robustness check. For `dml_estimate_treatment_effects()`, pass `estimand="ATE"`, `"ATT"`, or `"both"`; ATT is derived by averaging CATE estimates over treated observations (valid under unconfoundedness). When DML fits a constant effect (no X), ATE = ATT by construction.
 
 ### Binary outcome auto-detection
 `analyze_treatment_effect()` and `dml_estimate_treatment_effects()` both auto-detect binary outcomes. The IPTW method switches to Binomial family GEE; the DML method sets `discrete_outcome=True` and selects `RandomForestClassifier` for the outcome nuisance model. No manual override needed.
@@ -125,7 +126,7 @@ Both ATE and ATT are supported across both analysis approaches:
 - `analyze_survival_effect()` uses the same IPTW weighting infrastructure (`_prepare_iptw_data()`) as `analyze_treatment_effect()` but fits a Cox PH model instead of GEE
 - **Time interaction Cox** — `analyze_survival_effect(time_interaction='categorical', period_breaks=[0, 90, 180, 270, 365], period_labels=['0-3mo', '3-6mo', '6-9mo', '9-12mo'])` fits separate hazard ratios per time interval via person-period expansion, preferred in the notebook over a single global Cox model
 - `time_interaction='continuous'` is also available (models treatment × time as a linear trend) but not used in the current notebook
-- `compute_rmst_difference()` provides a business-friendly metric: additional days retained within the study window (available but not called in the current notebook pipeline)
+- `compute_rmst_difference()` provides a business-friendly metric: additional days retained within the study window
 - `build_survival_summary_table()` is the survival analogue of `build_summary_table()` and optionally includes RMST columns
 - `generate_survival_summary_report()` accepts an optional `survival_plot_fig` parameter for embedding the KM figure as an inline base64 image in the Markdown report
 
@@ -164,8 +165,8 @@ These helpers are defined inline in `s2_generate_data.py` (not importable). When
 ### DML-specific conventions
 - `dml_estimate_treatment_effects()` accepts the same triple-list covariate convention (`categorical_vars`, `binary_vars`, `continuous_vars`) or explicit `W_cols`/`X_cols` lists.
 - The `estimate` parameter controls the statistical method: `"ATE"` (Linear DML), `"CATE"` (Causal Forest), or `"both"`. This is orthogonal to `estimand` (the causal quantity).
-- In the notebook, DML is run with `estimate="both"` on `manager_efficacy_index` only — Linear DML validates the ATE from GEE, while Causal Forest explores heterogeneous treatment effects.
-- DML does **not** natively handle clustering (`team_id`). For cluster-robust inference, use `analyze_treatment_effect()`.
+- In the notebook, DoubleML should be used for the cluster-robust ATE comparison and econml Causal Forest should be used for heterogeneous treatment effects on `manager_efficacy_index`.
+- DoubleML handles clustering for the ATE robustness check; econml CATE estimates remain exploratory rather than cluster-robust inferential claims.
 - `model_y` and `model_t` default to `None` and are auto-instantiated inside the method to avoid mutable default arguments.
 - Column sanitization via `_clean_column_name()` is applied identically to the IPTW pipeline.
 - Return dict is structured for direct use with `build_summary_table()` and `compute_evalues_from_results()`.

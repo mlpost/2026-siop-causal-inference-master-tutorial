@@ -18,12 +18,13 @@ class (aliased as ``IPTWGEEModel`` for backward compatibility).
 
 Three complementary estimation approaches are supported:
 
-1. **IPTW + Doubly Robust GEE** — continuous / binary survey outcomes
+1. **IPTW + Covariate-Adjusted GEE** — continuous / binary survey outcomes
    (``analyze_treatment_effect``)
 2. **IPTW + Cox Proportional Hazards** — time-to-event (survival) outcomes
    (``analyze_survival_effect``), with optional piecewise (per-interval) HRs
-3. **Double Machine Learning (DML)** — ATE / ATT / CATE via ``econml``
-   (``dml_estimate_treatment_effects``)
+3. **Double Machine Learning (DML)** — cluster-robust ATE via ``doubleml``
+    and CATE exploration via ``econml``
+    (``dml_cluster_robust_ate`` / ``dml_estimate_treatment_effects``)
 
 Shared IPTW infrastructure (data prep, one-hot encoding, column sanitization,
 propensity score estimation, weight diagnostics, overlap/weight plotting, and
@@ -41,7 +42,7 @@ Building blocks (also usable standalone)
         Fit propensity score model and compute stabilized IPTW weights.
     ``compute_weight_diagnostics``
         Effective sample size (ESS) and weight summary statistics.
-    ``fit_doubly_robust_model``
+    ``fit_iptw_outcome_model``
         IPTW-weighted GEE with covariate adjustment.
     ``plot_propensity_overlap``
         Propensity score overlap density plot (delegates to CausalDiagnostics).
@@ -52,7 +53,7 @@ Building blocks (also usable standalone)
 
 High-level analysis (recommended entry points)
     ``analyze_treatment_effect``
-        Full IPTW + doubly robust GEE pipeline for survey outcomes.
+        Full IPTW + covariate-adjusted GEE pipeline for survey outcomes.
     ``analyze_survival_effect``
         Full IPTW + Cox PH pipeline for time-to-event outcomes; supports
         piecewise (quarterly) hazard ratios via ``_fit_cox_model`` with
@@ -84,7 +85,8 @@ Deprecated
 
 Dependencies
 ------------
-statsmodels, pandas, numpy, scipy, scikit-learn, matplotlib, lifelines, econml
+statsmodels, pandas, numpy, scipy, scikit-learn, matplotlib, lifelines,
+doubleml, econml
 
 Notes
 -----
@@ -120,6 +122,7 @@ from scipy.stats import norm
 from typing import Dict, List, Optional, Tuple, Union
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import train_test_split
+from doubleml import DoubleMLData, DoubleMLPLR
 from econml.dml import DML, CausalForestDML
 from econml.sklearn_extensions.linear_model import StatsModelsLinearRegression
 from econml.cate_interpreter import SingleTreeCateInterpreter
@@ -207,11 +210,12 @@ class CausalInferenceModel:
 
     This class implements three complementary approaches:
 
-    **Approach 1 — IPTW + Doubly Robust GEE** (``analyze_treatment_effect``):
+        **Approach 1 — IPTW + Covariate-Adjusted GEE** (``analyze_treatment_effect``):
     - For continuous and binary outcomes (e.g., survey indices, binary flags)
     - Stabilized inverse probability weights (IPTW) for ATE or ATT
     - Generalized Estimating Equations (GEE) to account for clustering
-    - Optional outcome model covariate adjustment for doubly robust property
+        - Optional outcome model covariate adjustment for additional protection
+            against model misspecification
 
     **Approach 2 — IPTW + Cox Proportional Hazards** (``analyze_survival_effect``):
     - For time-to-event outcomes (e.g., employee retention, time to departure)
@@ -220,11 +224,13 @@ class CausalInferenceModel:
     - Restricted Mean Survival Time (RMST) for business-friendly interpretation
     - Use ``prepare_survival_data()`` to convert departure dates to survival format
 
-    **Approach 3 — Double Machine Learning** (``dml_estimate_treatment_effects``):
-    - Linear DML for ATE/ATT estimation with flexible ML nuisance models
-    - Causal Forest DML for individualized CATE estimation
-    - ATT derived from CATE by averaging over treated observations
-    - Uses the ``econml`` package
+        **Approach 3 — Double Machine Learning**
+        (``dml_cluster_robust_ate`` / ``dml_estimate_treatment_effects``):
+        - DoubleML PLR for cluster-robust ATE estimation with flexible nuisance
+            models
+        - Causal Forest DML for individualized CATE estimation
+        - ATT derived from CATE by averaging over treated observations
+        - Uses ``doubleml`` for ATE robustness checks and ``econml`` for CATE
 
     The estimand (ATE vs. ATT) is determined by the weight construction formula
     (IPTW) or by subsetting CATE predictions (DML), not by GEE or Cox itself.
@@ -791,7 +797,7 @@ class CausalInferenceModel:
     # Outcome model components
     # ==================================================================
 
-    def fit_doubly_robust_model(
+    def fit_iptw_outcome_model(
         self,
         data: pd.DataFrame,
         outcome_var: str,
@@ -802,13 +808,21 @@ class CausalInferenceModel:
         family: str = "gaussian"
     ) -> object:
         """
-        Fit doubly robust treatment effect model using weighted GEE.
-        
+        Fit IPTW-weighted outcome model using GEE with covariate adjustment.
+
         Estimates the treatment effect using inverse probability weighting
         combined with outcome model covariate adjustment in a GEE framework.
-        
-        The model is doubly robust: consistent estimation occurs if either the
-        propensity score model OR the outcome model is correctly specified.
+
+        Including covariates in both the propensity score model and the outcome
+        model provides additional protection against misspecification of either
+        model - a property sometimes called double robustness under linearity
+        (Lunceford & Davidian, 2004). This protection requires that at least
+        one of the two models is correctly specified.
+
+        Note: This is not the formal Augmented IPW (AIPW) estimator, which has
+        a specific augmentation term that provides the doubly robust property
+        in a more general sense. The covariate-adjusted IPTW approach used here
+        achieves the same consistency property under linear outcome models.
         
         Parameters
         ----------
@@ -823,7 +837,7 @@ class CausalInferenceModel:
         cluster_var : str
             Name of the clustering variable (e.g., manager ID)
         covariates : List[str], optional
-            Additional covariates to include in outcome model for adjusted estimation
+            Additional covariates to include in the outcome model
         family : str, default="gaussian"
             Distribution family for GEE: "gaussian" or "binomial"
         
@@ -921,7 +935,7 @@ class CausalInferenceModel:
         cluster_var : str, optional
             Clustering variable for robust standard errors.
         covariates : list of str, optional
-            Additional covariates for doubly robust estimation.
+            Additional covariates for outcome-model adjustment.
         alpha : float, default 0.05
             Significance level for PH test reporting.
         time_interaction : str, default "categorical"
@@ -2160,14 +2174,15 @@ class CausalInferenceModel:
         plot_weights: bool = True
     ) -> Dict:
         """
-        Complete analysis pipeline: IPTW propensity weights → doubly robust outcome model.
+        Complete analysis pipeline: IPTW propensity weights -> weighted GEE
+        outcome model with covariate adjustment.
         
         Comprehensive causal inference analysis implementing:
         1. Data preparation and covariate encoding
         2. Propensity score estimation with IPTW computation (ATE or ATT)
         3. Propensity score overlap visualization
         4. Weight diagnostics, distribution visualization, and balance assessment
-        5. Doubly robust outcome modeling via weighted GEE
+        5. IPTW-weighted outcome modeling via GEE with covariate adjustment
         6. Effect size metrics (IPTW-weighted Cohen's d, percent change)
         7. Optional export to Excel workbook
 
@@ -2291,7 +2306,7 @@ class CausalInferenceModel:
         baseline_var    = _iptw["baseline_var"]
 
         # ------------------------------------------------------------------
-        # Step 3: Fit doubly robust outcome model
+        # Step 3: Fit IPTW-weighted outcome model with covariate adjustment
         # ------------------------------------------------------------------
         # Auto-detect binary outcomes for appropriate GEE family
         outcome_values = df[outcome_var].dropna().unique()
@@ -2310,7 +2325,7 @@ class CausalInferenceModel:
                 null_vars = null_counts[null_counts > 0].to_dict()
                 raise ValueError(f"Missing values in model variables: {null_vars}")
             
-            gee_res = self.fit_doubly_robust_model(
+            gee_res = self.fit_iptw_outcome_model(
                 df,
                 outcome_var,
                 treatment_var,
@@ -2460,6 +2475,13 @@ class CausalInferenceModel:
         alpha: float = 0.05,
     ) -> Dict:
         """
+        .. note::
+            For cluster-robust ATE estimation, prefer
+            ``dml_cluster_robust_ate()``, which uses the ``doubleml`` package
+            with native cluster support. This method remains available for
+            CATE estimation via Causal Forest, which ``doubleml`` does not
+            offer.
+
         Estimate ATE, ATT, and/or CATE using Double Machine Learning (DML).
 
         Implements two complementary DML estimators from the ``econml`` package:
@@ -2519,9 +2541,10 @@ class CausalInferenceModel:
             Which DML estimators to run: ``"ATE"`` (linear DML only),
             ``"CATE"`` (Causal Forest only), or ``"both"``.
         cluster_var : str, optional
-            Name of clustering variable. Stored in results metadata but **not**
-            used by DML (which does not natively handle clustering). For
-            cluster-robust inference, use ``analyze_treatment_effect()``.
+            Name of clustering variable. Stored in results metadata for the
+            econml workflow; not used directly by this estimator for inference.
+            For cluster-robust ATE estimation, prefer
+            ``dml_cluster_robust_ate()``.
         random_state : int, default=42
             Random seed for reproducibility.
         test_size : float, default=0.2
@@ -2593,10 +2616,9 @@ class CausalInferenceModel:
 
         Notes
         -----
-        - DML does **not** natively account for clustering. If your data has a
-          hierarchical structure (e.g. managers nested in teams), the standard
-          errors from DML may be anti-conservative. Use
-          ``analyze_treatment_effect()`` for cluster-robust inference.
+                - This econml-based workflow is best treated as the CATE exploration
+                    path. For like-for-like cluster-robust ATE comparison against
+                    IPTW + GEE, use ``dml_cluster_robust_ate()``.
         - ATT is derived by averaging CATE estimates over treated observations:
           E[τ(X) | T=1]. This is valid under unconfoundedness but does not use
           a dedicated ATT estimator. When DML is fit with X=None (homogeneous
@@ -3021,6 +3043,185 @@ class CausalInferenceModel:
             "cluster_var": cluster_var,
         }
 
+    def dml_cluster_robust_ate(
+        self,
+        data: pd.DataFrame,
+        outcome_col: str,
+        treatment_col: str,
+        categorical_vars: Optional[List[str]] = None,
+        binary_vars: Optional[List[str]] = None,
+        continuous_vars: Optional[List[str]] = None,
+        cluster_var: Optional[str] = None,
+        n_estimators: int = 200,
+        max_depth: int = 5,
+        cv: int = 5,
+        random_state: int = 42,
+        alpha: float = 0.05,
+    ) -> Dict:
+        """
+        Estimate ATE via Partially Linear Regression (PLR) Double Machine
+        Learning with native cluster-robust inference.
+
+        Uses the ``doubleml`` package (Bach et al., 2022), which provides
+        cluster-aware cross-fitting and cluster-robust standard errors
+        when ``cluster_cols`` is specified in ``DoubleMLData``.
+
+        This method is intended as a robustness check against the primary
+        IPTW + GEE estimates from ``analyze_treatment_effect()``. When both
+        methods account for clustering and produce similar ATEs, confidence
+        in the causal estimate increases.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Dataset containing outcome, treatment, and covariate variables.
+        outcome_col : str
+            Name of the outcome column (Y).
+        treatment_col : str
+            Name of the binary treatment column (T).
+        categorical_vars : list of str, optional
+            Categorical covariate names (will be one-hot encoded).
+        binary_vars : list of str, optional
+            Binary covariate names.
+        continuous_vars : list of str, optional
+            Continuous covariate names.
+        cluster_var : str, optional
+            Name of the clustering variable (e.g., 'team_id'). When provided,
+            DoubleML uses cluster-aware cross-fitting and cluster-robust
+            score-based inference.
+        n_estimators : int, default=200
+            Number of trees for Random Forest nuisance models.
+        max_depth : int, default=5
+            Max tree depth for nuisance models.
+        cv : int, default=5
+            Number of cross-fitting folds.
+        random_state : int, default=42
+            Random seed.
+        alpha : float, default=0.05
+            Significance level.
+
+        Returns
+        -------
+        dict
+            Dictionary with keys compatible with build_summary_table().
+
+        References
+        ----------
+        Bach P, Chernozhukov V, Kurz MS, Spindler M (2022). DoubleML -
+        An Object-Oriented Implementation of Double Machine Learning in
+        Python. Journal of Machine Learning Research, 23(53):1-6.
+        """
+        df = data.copy()
+
+        cat_vars = categorical_vars or []
+        bin_vars = binary_vars or []
+        cont_vars = continuous_vars or []
+
+        if cat_vars:
+            df = pd.get_dummies(df, columns=cat_vars, drop_first=True)
+
+        dummy_cols = [
+            column for column in df.columns
+            if any(column.startswith(var + "_") for var in cat_vars)
+        ]
+        x_cols = dummy_cols + bin_vars + cont_vars
+
+        rename_map = {column: self._clean_column_name(column) for column in df.columns}
+        df.rename(columns=rename_map, inplace=True)
+        outcome_col = self._clean_column_name(outcome_col)
+        treatment_col = self._clean_column_name(treatment_col)
+        x_cols = [self._clean_column_name(column) for column in x_cols]
+        if cluster_var:
+            cluster_var = self._clean_column_name(cluster_var)
+
+        all_cols = list(set([outcome_col, treatment_col] + x_cols + ([cluster_var] if cluster_var else [])))
+        df = df[all_cols].dropna().copy()
+
+        if len(df) < 20:
+            raise ValueError(
+                f"Insufficient data after removing missing values: {len(df)} rows"
+            )
+
+        dml_data_kwargs = {
+            "data": df,
+            "y_col": outcome_col,
+            "d_cols": treatment_col,
+            "x_cols": x_cols,
+        }
+        if cluster_var:
+            dml_data_kwargs["cluster_cols"] = cluster_var
+        dml_data = DoubleMLData(**dml_data_kwargs)
+
+        ml_l = RandomForestRegressor(
+            n_estimators=n_estimators,
+            max_depth=max_depth,
+            random_state=random_state,
+        )
+        ml_m = RandomForestClassifier(
+            n_estimators=n_estimators,
+            max_depth=max_depth,
+            random_state=random_state,
+        )
+
+        dml_plr = DoubleMLPLR(
+            dml_data,
+            ml_l=ml_l,
+            ml_m=ml_m,
+            n_folds=cv,
+        )
+        dml_plr.fit()
+
+        ate = float(dml_plr.coef[0])
+        se = float(dml_plr.se[0])
+        ci = dml_plr.confint(level=1 - alpha)
+        ci_lower = float(ci.iloc[0, 0])
+        ci_upper = float(ci.iloc[0, 1])
+        p_value = float(dml_plr.pval[0])
+        significant = p_value < alpha
+
+        n_clusters = df[cluster_var].nunique() if cluster_var else None
+
+        cluster_note = f", {n_clusters} clusters" if n_clusters else ""
+        print(f"\n  DoubleML PLR - Cluster-Robust ATE Estimation")
+        print(f"  {'=' * 50}")
+        print(f"  ATE = {ate:.4f} (SE = {se:.4f}{cluster_note})")
+        print(f"  {int((1-alpha)*100)}% CI: [{ci_lower:.4f}, {ci_upper:.4f}]")
+        print(f"  p-value = {p_value:.4f} {self._significance_stars(p_value)}")
+        print(f"  n = {len(df)}")
+        if cluster_var:
+            print(f"  Inference: cluster-robust (cluster_cols = '{cluster_var}')")
+        print(f"  {'=' * 50}")
+
+        return {
+            "effect": ate,
+            "estimand": "ATE",
+            "se": se,
+            "ci_lower": ci_lower,
+            "ci_upper": ci_upper,
+            "p_value": p_value,
+            "significant": significant,
+            "alpha": alpha,
+            "cohens_d": None,
+            "pct_change": None,
+            "mean_treatment": df[df[treatment_col] == 1][outcome_col].mean(),
+            "mean_control": df[df[treatment_col] == 0][outcome_col].mean(),
+            "outcome_type": "continuous",
+            "n_obs": len(df),
+            "n_clusters": n_clusters,
+            "coefficients_df": pd.DataFrame({
+                "Parameter": [treatment_col],
+                "Estimate": [ate],
+                "Std_Error": [se],
+                "CI_Lower": [ci_lower],
+                "CI_Upper": [ci_upper],
+                "P_Value_Raw": [p_value],
+                "Alpha": [alpha],
+            }),
+            "weight_diagnostics": {"n_observations": len(df)},
+            "doubleml_model": dml_plr,
+            "summary": dml_plr.summary,
+        }
+
     def dml_estimate_treatment_effects_help(self):
         """
         Print detailed documentation for ``dml_estimate_treatment_effects``.
@@ -3031,6 +3232,10 @@ class CausalInferenceModel:
         help_text = """
     Double Machine Learning (DML) for ATE, ATT, and CATE Estimation
     ================================================================
+
+    For cluster-robust ATE estimation, prefer
+    ``CausalInferenceModel.dml_cluster_robust_ate()``. The method documented
+    below remains the primary path for CATE estimation via ``econml``.
 
     This method implements Double Machine Learning (DML) to estimate the
     Average Treatment Effect (ATE), Average Treatment Effect on the Treated
@@ -3057,7 +3262,8 @@ class CausalInferenceModel:
     - discrete_treatment (bool): Whether treatment is discrete. Auto-detected if None.
     - estimand (str): "ATE", "ATT", or "both". Default: "ATE".
     - estimate (str): "ATE" (linear DML), "CATE" (Causal Forest), or "both".
-    - cluster_var (str): Clustering variable (stored for metadata; not used by DML).
+        - cluster_var (str): Clustering variable (stored for metadata in this econml
+            workflow; for cluster-robust ATE use dml_cluster_robust_ate).
     - random_state (int): Random seed. Default: 42.
     - test_size (float): Fraction held out for CATE evaluation. Default: 0.2.
     - n_estimators (int): Number of Causal Forest trees. Default: 500.

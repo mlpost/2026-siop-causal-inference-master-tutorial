@@ -10,7 +10,9 @@ This course walks through a real-world people analytics use case: **evaluating w
 
 - Estimate **Average Treatment Effects (ATE)** and **Average Treatment Effects on the Treated (ATT)** from observational data
 - Build and diagnose **inverse probability of treatment weights** (stabilized, trimmed)
-- Fit **doubly robust outcome models** using weighted GEE with cluster-robust standard errors
+- Fit **IPTW-weighted outcome models with covariate adjustment** using GEE with cluster-robust standard errors
+- Summarize retention using **RMST and IPTW-weighted survival differences** alongside time-varying hazard ratios
+- Compare primary estimates against a **cluster-robust DoubleML** ATE robustness check
 - Assess covariate balance before and after weighting
 - Conduct **E-value sensitivity analyses** to evaluate robustness to unmeasured confounding
 - Interpret and communicate causal findings to technical and non-technical audiences

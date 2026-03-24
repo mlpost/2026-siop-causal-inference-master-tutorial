@@ -722,10 +722,11 @@ class CausalDiagnostics:
         • If any remain > 0.1, your PS model needs improvement
             (add interactions, splines, or use a more flexible model)
 
-    4. USE DOUBLY ROBUST ESTIMATION (AIPW)
-        • Combines IPTW with an outcome model
-        • Consistent if EITHER the PS model OR the outcome model is correct
-        • Provides protection against PS model misspecification
+    4. USE IPTW WITH OUTCOME MODEL COVARIATE ADJUSTMENT
+        • Combine IPTW with a covariate-adjusted outcome model
+        • Under linearity, consistency holds if EITHER the PS model OR the
+            outcome model is correct
+        • Provides additional protection against model misspecification
 
     5. RUN SENSITIVITY ANALYSES
         • Compare ATE vs ATT estimates — if they diverge substantially,
@@ -828,8 +829,8 @@ class CausalDiagnostics:
                 _print("""
     RECOMMENDATIONS:
         • Target ATT rather than ATE
-        • Use doubly robust methods (AIPW) for protection against
-        model misspecification
+        • Use IPTW plus covariate adjustment in the outcome model for
+        additional protection against misspecification
         • Report effect for COMPARABLE individuals only
         • Acknowledge extrapolation limitations
                 """)
@@ -1610,11 +1611,11 @@ class CausalDiagnostics:
 
     NEXT STEPS:
         • IPTW with stabilized weights is appropriate
-        • Doubly robust (AIPW) adds further protection
+        • IPTW plus covariate adjustment adds further protection
         • Compare ATE and ATT estimates as a robustness check
             """)
             recommended_estimand = 'ATE'
-            next_step = 'ATE via IPTW or doubly robust estimation'
+            next_step = 'ATE via IPTW with covariate-adjusted outcome modeling'
 
         elif agg['all_ate_feasible'] and not agg['any_causal_questionable']:
             recommended_estimand = 'ATE (with caution)'
@@ -1641,7 +1642,7 @@ class CausalDiagnostics:
         (trim at 99th percentile; check max weight < 10x mean)
         2. Effective sample size (ESS) check — must be > 50% of N in each group
         3. Post-weighting balance — all weighted SMDs must be < 0.1
-        4. Doubly robust estimation (AIPW) recommended for added protection
+        4. IPTW plus covariate adjustment recommended for added protection
         5. Sensitivity analysis — compare ATE vs ATT; report both if they diverge
 
     IF ANY SAFEGUARD FAILS → fall back to ATT
