@@ -4331,7 +4331,7 @@ class CausalInferenceModel:
             p_clip = np.append(probs[mask], probs[mask][-1] if mask.any() else 1.0)
 
             # Trapezoidal integration
-            rmst = np.trapz(p_clip, t_clip)
+            rmst = np.trapezoid(p_clip, t_clip)
             return float(rmst)
 
         rmst_treated = _rmst_from_kmf(kmf_treated, time_horizon)
