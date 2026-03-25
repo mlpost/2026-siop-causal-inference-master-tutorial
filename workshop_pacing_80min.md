@@ -31,15 +31,15 @@ Pacing guide for [causal_inference_workshop.ipynb](causal_inference_workshop.ipy
 ## Checkpoint schedule
 
 
-| Block                                                           | Minutes  | Purpose                                             | Lead |
-| ----------------------------------------------------------------| -------- | --------------------------------------------------- | ---- |
-| Intro + Environment                                             | **10**   | Learning goals; Colab vs repo; run setup once       |      |
-| **CP1** Context & overview (pair with PPT slides 9-14)          | **10**   | Story; estimand intuition; DAG / threats            |      |
-| **CP2** Diagnostics & identification                            | **20**   | Why ATE fits; overlap and diagnostics               |      |
-| **CP3** Estimation & results                                    | **30**   | IPTW+GEE; survey results; retention; global summary |      |
-| **CP4** Stakeholders                                            | **5**    | HR/L&D narrative; recommendations                   |      |
-| **CP5** Further learning                                        | **2**    | Orient to DML/HTE; pointer or async                 |      |
-| Buffer                                                          | **~5–8** | Transitions; questions; overtime on CP3             |      |
+| Block                                                  | Minutes  | Purpose                                             | Lead |
+| ------------------------------------------------------ | -------- | --------------------------------------------------- | ---- |
+| Intro + Environment                                    | **10**   | Learning goals; Colab vs repo; run setup once       |      |
+| **CP1** Context & overview (pair with PPT slides 9-14) | **10**   | Story; estimand intuition; DAG / threats            |      |
+| **CP2** Diagnostics & identification                   | **20**   | Why ATE fits; overlap and diagnostics               |      |
+| **CP3** Estimation & results                           | **30**   | IPTW+GEE; survey results; retention; global summary |      |
+| **CP4** Stakeholders                                   | **5**    | HR/L&D narrative; recommendations                   |      |
+| **CP5** Further learning                               | **2**    | Orient to DML/HTE; pointer or async                 |      |
+| Buffer                                                 | **~5–8** | Transitions; questions; overtime on CP3             |      |
 
 
 ## Opening + environment (~10 min total)
@@ -47,8 +47,8 @@ Pacing guide for [causal_inference_workshop.ipynb](causal_inference_workshop.ipy
 
 | Sub-topic   | Minutes | Notebook focus                                                                                           | Live teaching emphasis                                           | Lead |
 | ----------- | ------- | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- | ---- |
-| Intro.      | ~5      | Slides 1-7                                                                                               | Intro to session, causal inference, and teaching goals           |      |
-| Environment | ~5      | Slide 8 + Colab setup cell vs local `SET-UP`; paths; imports `CausalDiagnostics`, `CausalInferenceModel` | Students run setup + load data; instructor narrates over outputs |      |
+| Intro.      | ~5      | Slides 1-7                                                                                               | Intro to session, causal inference, and teaching goals           | MP   |
+| Environment | ~5      | Slide 8 + Colab setup cell vs local `SET-UP`; paths; imports `CausalDiagnostics`, `CausalInferenceModel` | Students run setup + load data; instructor narrates over outputs | MP   |
 
 
 ## CP1 — Context & overview (~10 min total)
@@ -56,9 +56,9 @@ Pacing guide for [causal_inference_workshop.ipynb](causal_inference_workshop.ipy
 
 | Sub-topic             | Minutes | Notebook focus                         | Live teaching emphasis                                                    | Lead |
 | --------------------- | ------- | -------------------------------------- | ------------------------------------------------------------------------- | ---- |
-| Case study & timeline | ~2.5    | Intro markdown through timeline figure | Voluntary treatment; uneven promotion; mid-year review stakes             |      |
-| Data & outcomes       | ~2.4    | `## The Data & Outcomes`               | Sample sizes; survey scales vs retention / survival measurement           |      |
-| DAG & confounding     | ~5      | `### Causal DAG...`                    | `X→T`, `X→Y`, org→promotion→`T`; why later methods; E-values foreshadowed |      |
+| Case study & timeline | ~2.5    | Intro markdown through timeline figure | Voluntary treatment; uneven promotion; mid-year review stakes             | MP   |
+| Data & outcomes       | ~2.4    | `## The Data & Outcomes`               | Sample sizes; survey scales vs retention / survival measurement           | MP   |
+| DAG & confounding     | ~5      | `### Causal DAG...`                    | `X→T`, `X→Y`, org→promotion→`T`; why later methods; E-values foreshadowed | MP   |
 
 
 ## CP2 — Diagnostics & identification (~20 min total)
@@ -66,12 +66,12 @@ Pacing guide for [causal_inference_workshop.ipynb](causal_inference_workshop.ipy
 
 | Sub-topic                 | Minutes | Notebook focus                                                             | Live teaching emphasis                                       | Lead |
 | ------------------------- | ------- | -------------------------------------------------------------------------- | ------------------------------------------------------------ | ---- |
-| ATE vs ATT                | ~3      | CP2 opening table                                                          | Tie rows to scale vs participants; justify **ATE**           |      |
-| Positivity / restriction  | ~5      | `### Positivity Violation: No Low Performers...` + restricted descriptives | Logic of restriction; concepts over re-deriving every number |      |
-| Diagnostic prep           | ~1      | Variable lists; `CausalDiagnostics`                                        | What the class does (high level)                             |      |
-| Multicollinearity screens | ~5      | Intercorrelations; VIF                                                     | Concept and thresholds; skip line-by-line if tight           |      |
-| Overlap / propensity      | ~5      | Pre-modeling overlap diagnostics                                           | Core credibility question (non-optional heart of CP2)        |      |
-| Bridge to estimation      | ~1      | Narrative before `checkpoint3.png`                                         | Estimand + overlap → proceed to IPTW+GEE                     |      |
+| ATE vs ATT                | ~3      | CP2 opening table                                                          | Tie rows to scale vs participants; justify **ATE**           | LS   |
+| Positivity / restriction  | ~5      | `### Positivity Violation: No Low Performers...` + restricted descriptives | Logic of restriction; concepts over re-deriving every number | LS   |
+| Diagnostic prep           | ~1      | Variable lists; `CausalDiagnostics`                                        | What the class does (high level)                             | LS   |
+| Multicollinearity screens | ~5      | Intercorrelations; VIF                                                     | Concept and thresholds; skip line-by-line if tight           | LS   |
+| Overlap / propensity      | ~5      | Pre-modeling overlap diagnostics                                           | Core credibility question (non-optional heart of CP2)        | LS   |
+| Bridge to estimation      | ~1      | Narrative before `checkpoint3.png`                                         | Estimand + overlap → proceed to IPTW+GEE                     | LS   |
 
 
 ## CP3 — Estimation & results (~30 min total)
@@ -79,12 +79,12 @@ Pacing guide for [causal_inference_workshop.ipynb](causal_inference_workshop.ipy
 
 | Sub-topic                | Minutes | Notebook focus                                                                         | Live teaching emphasis                                                                                           | Lead |
 | ------------------------ | ------- | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | ---- |
-| IPTW + GEE rationale     | ~5      | `## Estimating Average Treatment Effect...` through `## Summary: Model Design Choices` | Weights + clustered SEs + covariate adjustment; pointer-only optional: continuous/binary subsections, GEE vs OLS |      |
-| Survey ATE execution     | ~8      | ATE loop + summary table                                                               | Cohen’s d; FDR from printed summary                                                                              |      |
-| Interpretation blocks    | ~4      | Self-report bias caveat; balance; E-values                                             | Interpretation, not full sensitivity lecture                                                                     |      |
-| ATE vs ATT               | ~3      | `## ATE vs. ATT: What Changes?`                                                        | Weight intuition; stakeholder choice; optional code stays commented                                              |      |
-| Retention / survival     | ~8      | Retention markdown + Cox / KM outputs                                                  | Why not four binary GEEs; time interaction; HR intuition; survivor caveat; KM quick or pointer                   |      |
-| Global technical summary | ~2      | `## Global Technical Summary...`                                                       | One-slide consolidation before CP4                                                                               |      |
+| IPTW + GEE rationale     | ~5      | `## Estimating Average Treatment Effect...` through `## Summary: Model Design Choices` | Weights + clustered SEs + covariate adjustment; pointer-only optional: continuous/binary subsections, GEE vs OLS | MP   |
+| Survey ATE execution     | ~8      | ATE loop + summary table                                                               | Cohen’s d; FDR from printed summary                                                                              | MP   |
+| Interpretation blocks    | ~4      | Self-report bias caveat; balance; E-values                                             | Interpretation, not full sensitivity lecture                                                                     | LS   |
+| ATE vs ATT               | ~3      | `## ATE vs. ATT: What Changes?`                                                        | Weight intuition; stakeholder choice; optional code stays commented                                              | LS   |
+| Retention / survival     | ~8      | Retention markdown + Cox / KM outputs                                                  | Why not four binary GEEs; time interaction; HR intuition; survivor caveat; KM quick or pointer                   | NL   |
+| Global technical summary | ~2      | `## Global Technical Summary...`                                                       | One-slide consolidation before CP4                                                                               | NL   |
 
 
 ## CP4 — Stakeholders (~5 min total)
@@ -92,7 +92,7 @@ Pacing guide for [causal_inference_workshop.ipynb](causal_inference_workshop.ipy
 
 | Sub-topic           | Minutes | Notebook focus                                                            | Live teaching emphasis                                | Lead |
 | ------------------- | ------- | ------------------------------------------------------------------------- | ----------------------------------------------------- | ---- |
-| Narrative & actions | ~5      | `### What We Found`; fade story; `### Recommendations`; `### Bottom Line` | Decisions and caveats; minimize formula re-derivation |      |
+| Narrative & actions | ~5      | `### What We Found`; fade story; `### Recommendations`; `### Bottom Line` | Decisions and caveats; minimize formula re-derivation | IU   |
 
 
 ## CP5 — Further learning (~2 min live)
@@ -100,7 +100,7 @@ Pacing guide for [causal_inference_workshop.ipynb](causal_inference_workshop.ipy
 
 | Sub-topic   | Minutes | Notebook focus                                                               | Live teaching emphasis                                                        | Lead |
 | ----------- | ------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ---- |
-| Orientation | ~2      | `### Why Explore Alternative Methods...`; Part 1 / Part 2; method comparison | Pointer to DML + Causal Forest; full math / HTE plots async unless time added |      |
+| Orientation | ~2      | `### Why Explore Alternative Methods...`; Part 1 / Part 2; method comparison | Pointer to DML + Causal Forest; full math / HTE plots async unless time added | NL   |
 
 
 ## Optional / pointer-only segments
