@@ -2363,7 +2363,7 @@ class CausalDiagnostics:
         """Display a summary of the CausalDiagnostics class and all its methods."""
         print("""
         ╔══════════════════════════════════════════════════════════════════════════════╗
-        ║  CausalDiagnostics — Unified Causal Inference Diagnostic Toolkit            ║
+        ║  CausalDiagnostics — Unified Causal Inference Diagnostic Toolkit             ║
         ╚══════════════════════════════════════════════════════════════════════════════╝
 
         Usage:
@@ -2403,7 +2403,7 @@ class CausalDiagnostics:
                                 binary_vars=None, continuous_vars=None,
                                 baseline_vars=None)
         Full overlap diagnostic:
-            CHECK 1A: Continuous variables   — SMD (means & pooled SD)
+            CHECK 1A: Continuous variables   — SMD (standardized mean differences; means & pooled SD)
             CHECK 1B: Binary variables       — SMD (proportions)
             CHECK 1C: Categorical variables  — Chi-square + Cramér's V
             CHECK 1D: Baseline outcomes      — SMD (pre-treatment levels)

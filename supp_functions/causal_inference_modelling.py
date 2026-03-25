@@ -1396,7 +1396,326 @@ class CausalInferenceModel:
             "n_events_control": int(control_events),
             "coefficients_df": coefficients_df,
         }
+    
+    
 
+    def _fit_standard_cox_model(
+        self,
+        data: pd.DataFrame,
+        time_var: str,
+        event_var: str,
+        treatment_var: str,
+        weight_col: str,
+        cluster_var: Optional[str] = None,
+        covariates: Optional[List[str]] = None,
+        alpha: float = 0.05,
+    ) -> Dict:
+        """
+        Fit a standard IPTW-weighted Cox proportional hazards model (no time
+        interaction terms).
+
+        Produces a single overall hazard ratio for the treatment effect under the
+        proportional-hazards assumption. If the PH assumption is violated, a
+        warning is printed recommending ``analyze_survival_effect()`` with
+        ``time_interaction='categorical'`` instead.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Data with time_var, event_var, treatment_var, weight_col, and
+            any covariates.
+        time_var : str
+            Name of the time column (days_observed).
+        event_var : str
+            Name of the event column (departed).
+        treatment_var : str
+            Binary treatment variable (1 = treated, 0 = control).
+        weight_col : str
+            IPTW weight column.
+        cluster_var : str, optional
+            Clustering variable for robust standard errors.
+        covariates : list of str, optional
+            Additional covariates for outcome-model adjustment.
+        alpha : float, default 0.05
+            Significance level for confidence intervals and PH test.
+
+        Returns
+        -------
+        dict
+            Results dictionary with:
+            - period_hrs         : single-row DataFrame with period="overall",
+                                   HR, CI, p-value.
+            - time_interaction   : None (sentinel for standard Cox).
+            - concordance        : float, concordance index.
+            - ph_test_results    : DataFrame of PH test results.
+            - ph_assumption_met  : bool, whether treatment passes PH test.
+            - survival_at_snapshots : DataFrame of KM survival probabilities
+                                     at 90, 180, 270, 365 days.
+            - kmf_treated        : fitted KaplanMeierFitter for treated group.
+            - kmf_control        : fitted KaplanMeierFitter for control group.
+            - cox_model          : fitted CoxPHFitter object.
+            - n_events_treated   : int.
+            - n_events_control   : int.
+            - coefficients_df    : DataFrame of all model coefficients.
+
+        Raises
+        ------
+        ValueError
+            If required columns are missing, insufficient events, or model
+            fitting fails.
+        """
+        # ------------------------------------------------------------------
+        # Validate inputs
+        # ------------------------------------------------------------------
+        required_cols = [time_var, event_var, treatment_var, weight_col]
+        missing_cols = [c for c in required_cols if c not in data.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns: {missing_cols}")
+
+        treated_events = ((data[treatment_var] == 1) & (data[event_var] == 1)).sum()
+        control_events = ((data[treatment_var] == 0) & (data[event_var] == 1)).sum()
+
+        if treated_events < 5:
+            raise ValueError(
+                f"Insufficient events in treated group: {treated_events} < 5"
+            )
+        if control_events < 5:
+            raise ValueError(
+                f"Insufficient events in control group: {control_events} < 5"
+            )
+
+        print("\n" + "=" * 60)
+        print("COX PROPORTIONAL HAZARDS MODEL — STANDARD (NO TIME INTERACTION)")
+        print("=" * 60)
+        print(f"Model            : {treatment_var} (single overall HR)")
+
+        # ------------------------------------------------------------------
+        # Build formula variables — treatment + covariates only
+        # ------------------------------------------------------------------
+        formula_vars = [treatment_var]
+        if covariates:
+            formula_vars = formula_vars + [c for c in covariates if c not in formula_vars]
+
+        # ------------------------------------------------------------------
+        # Prepare data and fit
+        # ------------------------------------------------------------------
+        keep_cols = (
+            [time_var, event_var, weight_col]
+            + formula_vars
+            + ([cluster_var] if cluster_var and cluster_var in data.columns else [])
+        )
+        keep_cols = list(dict.fromkeys(keep_cols))
+        cox_data = data[keep_cols].copy().dropna()
+
+        if len(cox_data) < 20:
+            raise ValueError(
+                f"Insufficient data for Cox model after preprocessing: "
+                f"{len(cox_data)} rows"
+            )
+
+        cph = CoxPHFitter()
+        fit_kw = dict(
+            duration_col=time_var,
+            event_col=event_var,
+            weights_col=weight_col,
+        )
+        if cluster_var and cluster_var in data.columns:
+            fit_kw["robust"] = True
+            fit_kw["cluster_col"] = cluster_var
+
+        try:
+            cph.fit(cox_data, **fit_kw)
+        except Exception as e:
+            raise ValueError(f"Cox model fitting failed: {e}")
+
+        concordance = float(cph.concordance_index_)
+        print(f"\nModel fitted     : {len(cox_data):,} observations, "
+              f"{int(treated_events + control_events)} events")
+        print(f"Concordance      : {concordance:.3f}")
+
+        # ------------------------------------------------------------------
+        # PH test
+        # ------------------------------------------------------------------
+        ph_test_results = None
+        ph_assumption_met = None
+
+        print("\n--- Proportional Hazards Test ---")
+        print(
+            "NOTE: Standard Cox PH assumes proportional hazards.\n"
+            "      If treatment violates PH, consider using\n"
+            "      analyze_survival_effect(time_interaction='categorical')\n"
+            "      to model time-varying effects."
+        )
+
+        try:
+            from lifelines.statistics import proportional_hazard_test
+
+            ph_result = proportional_hazard_test(
+                cph, cox_data, time_transform="rank",
+            )
+
+            if ph_result.summary is not None and not ph_result.summary.empty:
+                ph_test_results = ph_result.summary.copy()
+                ph_test_results["note"] = ""
+
+                if treatment_var in ph_test_results.index.get_level_values(0):
+                    treat_p = float(
+                        ph_test_results.loc[treatment_var, "p"].iloc[0]
+                        if hasattr(
+                            ph_test_results.loc[treatment_var, "p"], "iloc"
+                        )
+                        else ph_test_results.loc[treatment_var, "p"]
+                    )
+                    ph_assumption_met = treat_p >= alpha
+                else:
+                    ph_assumption_met = True
+
+                print(
+                    ph_test_results[["test_statistic", "p", "note"]].to_string()
+                )
+
+                if ph_assumption_met is False:
+                    print(
+                        "\n  ⚠️  Treatment variable VIOLATES proportional "
+                        "hazards assumption.\n"
+                        "      The single HR may be misleading. Consider "
+                        "re-running with\n"
+                        "      analyze_survival_effect("
+                        "time_interaction='categorical')."
+                    )
+                else:
+                    print("\n  ✓ Proportional hazards assumption met for treatment.")
+            else:
+                print("PH test returned no results.")
+        except Exception as e:
+            print(f"⚠️  PH test could not be completed: {e}")
+
+        # ------------------------------------------------------------------
+        # Extract single overall hazard ratio
+        # ------------------------------------------------------------------
+        print("\n--- Overall Hazard Ratio ---")
+
+        from scipy import stats as scipy_stats
+        z_crit = scipy_stats.norm.ppf(1 - alpha / 2)
+
+        beta_treat = float(cph.params_[treatment_var])
+        se_treat = float(cph.standard_errors_[treatment_var])
+        hr = np.exp(beta_treat)
+        hr_lower = np.exp(beta_treat - z_crit * se_treat)
+        hr_upper = np.exp(beta_treat + z_crit * se_treat)
+        z_stat = beta_treat / se_treat
+        p_val = 2 * (1 - scipy_stats.norm.cdf(abs(z_stat)))
+
+        period_hrs = pd.DataFrame([{
+            "period": "overall",
+            "timepoint_days": None,
+            "hazard_ratio": round(hr, 4),
+            "hr_ci_lower": round(hr_lower, 4),
+            "hr_ci_upper": round(hr_upper, 4),
+            "p_value": round(p_val, 4),
+            "log_hr": round(beta_treat, 4),
+            "se_log_hr": round(se_treat, 4),
+            "note": "single overall HR (no time interaction)",
+        }])
+        print(period_hrs.to_string(index=False))
+
+        # ------------------------------------------------------------------
+        # Build coefficients DataFrame
+        # ------------------------------------------------------------------
+        coefficients_df = pd.DataFrame({
+            "Parameter": cph.params_.index.tolist(),
+            "Estimate": cph.params_.values.tolist(),
+            "Std_Error": cph.standard_errors_.values.tolist(),
+            "CI_Lower": cph.confidence_intervals_.iloc[:, 0].values.tolist(),
+            "CI_Upper": cph.confidence_intervals_.iloc[:, 1].values.tolist(),
+            "P_Value_Raw": cph.summary["p"].values.tolist(),
+            "Alpha": [alpha] * len(cph.params_),
+        })
+
+        # ------------------------------------------------------------------
+        # Fit IPTW-weighted Kaplan-Meier curves
+        # ------------------------------------------------------------------
+        print("\nFitting IPTW-weighted Kaplan-Meier survival curves...")
+
+        treated_data = data[data[treatment_var] == 1]
+        control_data = data[data[treatment_var] == 0]
+
+        kmf_treated = KaplanMeierFitter()
+        kmf_control = KaplanMeierFitter()
+
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=".*weights are not integers.*",
+                    category=StatisticalWarning,
+                )
+                kmf_treated.fit(
+                    durations=treated_data[time_var],
+                    event_observed=treated_data[event_var],
+                    weights=treated_data[weight_col],
+                    label="Treated",
+                )
+                kmf_control.fit(
+                    durations=control_data[time_var],
+                    event_observed=control_data[event_var],
+                    weights=control_data[weight_col],
+                    label="Control",
+                )
+        except Exception as e:
+            raise ValueError(f"Kaplan-Meier fitting failed: {e}")
+
+        # ------------------------------------------------------------------
+        # Survival snapshots
+        # ------------------------------------------------------------------
+        snapshot_days = [90, 180, 270, 365]
+        survival_snapshots = []
+
+        for days in snapshot_days:
+            try:
+                s_t = float(
+                    kmf_treated.survival_function_at_times(days).iloc[0]
+                )
+                s_c = float(
+                    kmf_control.survival_function_at_times(days).iloc[0]
+                )
+                survival_snapshots.append({
+                    "timepoint_days": days,
+                    "timepoint_label": (
+                        f"{days // 30}mo" if days % 30 == 0 else f"{days}d"
+                    ),
+                    "survival_treated": s_t,
+                    "survival_control": s_c,
+                    "survival_diff": s_t - s_c,
+                })
+            except Exception:
+                survival_snapshots.append({
+                    "timepoint_days": days,
+                    "timepoint_label": (
+                        f"{days // 30}mo" if days % 30 == 0 else f"{days}d"
+                    ),
+                    "survival_treated": np.nan,
+                    "survival_control": np.nan,
+                    "survival_diff": np.nan,
+                })
+
+        survival_at_snapshots = pd.DataFrame(survival_snapshots)
+        print("=" * 60)
+
+        return {
+            "period_hrs": period_hrs,
+            "time_interaction": None,
+            "concordance": concordance,
+            "ph_test_results": ph_test_results,
+            "ph_assumption_met": ph_assumption_met,
+            "survival_at_snapshots": survival_at_snapshots,
+            "kmf_treated": kmf_treated,
+            "kmf_control": kmf_control,
+            "cox_model": cph,
+            "n_events_treated": int(treated_events),
+            "n_events_control": int(control_events),
+            "coefficients_df": coefficients_df,
+        }
     
     # ==================================================================
     # Visualization
@@ -3742,6 +4061,322 @@ class CausalInferenceModel:
             "event_var": event_var,
         }
     
+
+    def analyze_standard_survival_effect(
+        self,
+        data: pd.DataFrame,
+        time_var: str,
+        event_var: str,
+        treatment_var: str,
+        categorical_vars: List[str],
+        binary_vars: List[str],
+        continuous_vars: List[str],
+        cluster_var: str,
+        estimand: str = "ATE",
+        project_path: Optional[str] = None,
+        trim_quantile: float = 0.99,
+        analysis_name: Optional[str] = None,
+        alpha: float = 0.05,
+        plot_propensity: bool = True,
+        plot_weights: bool = True,
+    ) -> Dict:
+        """
+        Complete survival analysis pipeline: IPTW → standard Cox PH model.
+
+        Simpler alternative to ``analyze_survival_effect()`` that fits a single
+        overall hazard ratio under the proportional-hazards assumption (no time
+        interaction terms, no person-period expansion).
+
+        Use this when:
+        - You want a quick, parsimonious estimate
+        - PH is expected to hold (e.g., short study window, stable effect)
+        - You want a baseline comparison before the time-interaction model
+
+        If PH is violated, the method prints a warning recommending the
+        time-interaction variant.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            Dataset with time_var, event_var, treatment, and covariates.
+        time_var : str
+            Name of time column (days from T=0 to event/censoring).
+        event_var : str
+            Name of event indicator column (1=event, 0=censored).
+        treatment_var : str
+            Name of binary treatment variable.
+        categorical_vars : List[str]
+            Categorical covariate names (will be one-hot encoded).
+        binary_vars : List[str]
+            Binary covariate names.
+        continuous_vars : List[str]
+            Continuous covariate names.
+        cluster_var : str
+            Clustering variable for robust standard errors.
+        estimand : str, default="ATE"
+            Target estimand: "ATE" or "ATT".
+        project_path : str, optional
+            Path to save results Excel file.
+        trim_quantile : float, default=0.99
+            Quantile for weight trimming.
+        analysis_name : str, optional
+            Analysis identifier for file naming.
+        alpha : float, default=0.05
+            Significance level for confidence intervals.
+        plot_propensity : bool, default=True
+            If True, generates propensity score overlap plot.
+        plot_weights : bool, default=True
+            If True, generates IPTW weight distribution plot.
+
+        Returns
+        -------
+        dict
+            Same structure as ``analyze_survival_effect()`` for compatibility
+            with ``build_survival_summary_table()``,
+            ``compute_evalues_from_results()``, ``compute_rmst_difference()``,
+            and ``plot_survival_curves()``.
+
+            Key differences from the time-interaction variant:
+            - ``period_hrs`` contains a single row with ``period="overall"``
+            - ``time_interaction`` is ``None``
+            - ``effect`` is the single overall hazard ratio
+
+        Raises
+        ------
+        ValueError
+            If data preparation, model fitting, or validation fails.
+
+        See Also
+        --------
+        analyze_survival_effect : Time-interaction Cox model (recommended
+            when PH may be violated).
+        """
+        # Validate estimand
+        estimand = estimand.upper()
+        if estimand not in ["ATE", "ATT"]:
+            raise ValueError(f"estimand must be 'ATE' or 'ATT', got '{estimand}'")
+
+        # ------------------------------------------------------------------
+        # Steps 0–2: Data prep, propensity weighting, diagnostics
+        # ------------------------------------------------------------------
+        _iptw = self._prepare_iptw_data(
+            data=data,
+            treatment_var=treatment_var,
+            cluster_var=cluster_var,
+            categorical_vars=categorical_vars,
+            binary_vars=binary_vars,
+            continuous_vars=continuous_vars,
+            estimand=estimand,
+            trim_quantile=trim_quantile,
+            plot_propensity=plot_propensity,
+            plot_weights=plot_weights,
+            time_var=time_var,
+            event_var=event_var,
+            preserve_strata_backups=False,
+            analysis_label=f"Standard Survival Analysis ({estimand})",
+        )
+        df             = _iptw["df"]
+        ps_model       = _iptw["ps_model"]
+        weight_stats   = _iptw["weight_stats"]
+        balance_df     = _iptw["balance_df"]
+        ps_overlap_fig = _iptw["ps_overlap_fig"]
+        weight_dist_fig = _iptw["weight_dist_fig"]
+        covariates     = _iptw["covariates"]
+        treatment_var  = _iptw["treatment_var"]
+        cluster_var    = _iptw["cluster_var"]
+        time_var       = _iptw["time_var"]
+        event_var      = _iptw["event_var"]
+
+        # ------------------------------------------------------------------
+        # STEP 3: Fit standard Cox PH model
+        # ------------------------------------------------------------------
+        try:
+            cox_results = self._fit_standard_cox_model(
+                data=df,
+                time_var=time_var,
+                event_var=event_var,
+                treatment_var=treatment_var,
+                weight_col="iptw",
+                cluster_var=cluster_var,
+                covariates=covariates,
+                alpha=alpha,
+            )
+        except Exception as e:
+            raise ValueError(f"Error fitting standard Cox model: {str(e)}")
+
+        # ------------------------------------------------------------------
+        # STEP 4: Extract results
+        # ------------------------------------------------------------------
+        period_hrs = cox_results["period_hrs"]
+        concordance = cox_results["concordance"]
+        ph_test_results = cox_results.get("ph_test_results")
+        ph_assumption_met = cox_results.get("ph_assumption_met")
+
+        display_row = period_hrs.iloc[0]
+        hazard_ratio = display_row["hazard_ratio"]
+        hr_ci_lower = display_row["hr_ci_lower"]
+        hr_ci_upper = display_row["hr_ci_upper"]
+        hr_pvalue = display_row["p_value"]
+
+        significant = hr_pvalue < alpha
+        stars = self._significance_stars(hr_pvalue)
+        ci_pct = int((1 - alpha) * 100)
+
+        # ------------------------------------------------------------------
+        # Print summary
+        # ------------------------------------------------------------------
+        print(f"\n{'=' * 60}")
+        print(f"SURVIVAL ANALYSIS RESULTS — STANDARD COX PH ({estimand})")
+        print(f"{'=' * 60}")
+        print(f"  Model type:        Standard Cox PH (single overall HR)")
+        print()
+        print(f"  Overall Hazard Ratio")
+        print(f"  Hazard Ratio:      {hazard_ratio:.3f} "
+              f"({ci_pct}% CI: [{hr_ci_lower:.3f}, {hr_ci_upper:.3f}])")
+        print(f"  P-value:           {hr_pvalue:.4f} {stars}")
+        print(f"  Concordance:       {concordance:.3f}")
+        print()
+
+        if ph_test_results is not None:
+            print("  Proportional Hazards Test:")
+            if ph_assumption_met is False:
+                print("    ⚠️  Treatment PH violation detected.")
+                print("    Consider using analyze_survival_effect("
+                      "time_interaction='categorical')")
+            elif ph_assumption_met is True:
+                print("    ✓  No treatment PH violation detected")
+            print("    See ph_test_results for full details.")
+        print()
+
+        print("  Note: Standard Cox PH assumes a constant hazard ratio over time.")
+        print("  If PH is violated, use analyze_survival_effect() with")
+        print("  time_interaction='categorical' for time-varying effects.")
+        print("  IPTW-weighted KM curves provide descriptive snapshots;")
+        print("  all inference comes from Cox model with robust sandwich SEs.")
+        print(f"{'=' * 60}")
+
+        # --- Survival probabilities at 365 days ---
+        survival_snapshots = cox_results.get(
+            "survival_at_snapshots", pd.DataFrame()
+        )
+        snap_365 = survival_snapshots[
+            survival_snapshots["timepoint_days"] == 365
+        ]
+
+        if not snap_365.empty:
+            mean_treatment = float(snap_365["survival_treated"].iloc[0])
+            mean_control = float(snap_365["survival_control"].iloc[0])
+        else:
+            mean_treatment = float(
+                1 - df[df[treatment_var] == 1][event_var].mean()
+            )
+            mean_control = float(
+                1 - df[df[treatment_var] == 0][event_var].mean()
+            )
+
+        # --- Compatibility coefficients_df ---
+        log_hr = np.log(hazard_ratio)
+        log_hr_se = (
+            (np.log(hr_ci_upper) - np.log(hr_ci_lower)) / (2 * 1.96)
+        )
+
+        coefficients_df = pd.DataFrame({
+            "Parameter": [f"{treatment_var}_overall_HR"],
+            "Estimate": [log_hr],
+            "Std_Error": [log_hr_se],
+            "CI_Lower": [np.log(hr_ci_lower)],
+            "CI_Upper": [np.log(hr_ci_upper)],
+            "P_Value_Raw": [hr_pvalue],
+            "Alpha": [alpha],
+        })
+
+        ps_summary_df = self._build_ps_summary_df(ps_model)
+
+        # ------------------------------------------------------------------
+        # STEP 5: Export (optional)
+        # ------------------------------------------------------------------
+        if project_path and analysis_name:
+            try:
+                export_path = (
+                    f"{project_path}/"
+                    f"{estimand.lower()}_iptw_cox_standard_{analysis_name}.xlsx"
+                )
+                with pd.ExcelWriter(export_path, engine="openpyxl") as writer:
+                    balance_df.to_excel(
+                        writer, sheet_name="Covariate_Balance", index=False
+                    )
+                    pd.DataFrame([weight_stats]).to_excel(
+                        writer, sheet_name="Weight_Diagnostics", index=False
+                    )
+                    period_hrs.to_excel(
+                        writer, sheet_name="Overall_HR", index=False
+                    )
+                    coefficients_df.to_excel(
+                        writer, sheet_name=f"{estimand}_Cox_Summary", index=False
+                    )
+                    ps_summary_df.to_excel(
+                        writer, sheet_name="Propensity_Model", index=False
+                    )
+                    if not survival_snapshots.empty:
+                        survival_snapshots.to_excel(
+                            writer, sheet_name="Survival_Snapshots", index=False
+                        )
+                    if ph_test_results is not None:
+                        ph_test_results.to_excel(
+                            writer, sheet_name="PH_Test_Results", index=False
+                        )
+                print(f"  Results saved to {export_path}")
+            except Exception as e:
+                print(f"  Warning: Could not export results to Excel: {e}")
+
+        # ------------------------------------------------------------------
+        # STEP 6: Return results dict
+        # ------------------------------------------------------------------
+        return {
+            # --- Shared keys (build_summary_table / compute_evalues compat) ---
+            "effect": hazard_ratio,
+            "estimand": estimand,
+            "ci_lower": hr_ci_lower,
+            "ci_upper": hr_ci_upper,
+            "p_value": hr_pvalue,
+            "significant": significant,
+            "alpha": alpha,
+            "cohens_d": None,
+            "pct_change": None,
+            "mean_treatment": mean_treatment,
+            "mean_control": mean_control,
+            "outcome_type": "survival",
+            "coefficients_df": coefficients_df,
+            "full_coefficients_df": cox_results.get("coefficients_df"),
+            "ps_model": ps_model,
+            "ps_summary_df": ps_summary_df,
+            "balance_df": balance_df,
+            "weight_diagnostics": weight_stats,
+            "ps_overlap_fig": ps_overlap_fig,
+            "weight_dist_fig": weight_dist_fig,
+            "weighted_df": df,
+
+            # --- Survival-specific keys ---
+            "period_hrs": period_hrs,
+            "time_interaction": None,
+            "concordance": concordance,
+            "ph_test_results": ph_test_results,
+            "ph_assumption_met": ph_assumption_met,
+            "kmf_treated": cox_results.get("kmf_treated"),
+            "kmf_control": cox_results.get("kmf_control"),
+            "cox_model": cox_results.get("cox_model"),
+            "survival_at_snapshots": survival_snapshots,
+            "n_events_treated": cox_results.get("n_events_treated"),
+            "n_events_control": cox_results.get("n_events_control"),
+            "n_treated": int(df[treatment_var].sum()),
+            "n_control": int((df[treatment_var] == 0).sum()),
+
+            # --- Variable-name metadata ---
+            "treatment_var": treatment_var,
+            "time_var": time_var,
+            "event_var": event_var,
+        }
+    
     # ==================================================================
     # Sensitivity analysis
     # ==================================================================
@@ -4656,7 +5291,7 @@ class CausalInferenceModel:
         summary_df["Correction_Method"] = correction_method if len(raw_pvals) > 1 else "none"
 
         # --- Print formatted table ---
-        display_title = title or "IPTW + Cox Time Interaction: Survival Analysis Summary"
+        display_title = title or "IPTW + Cox: Survival Analysis Summary"
         print(f"\n{'=' * 80}")
         print(f"  {display_title}")
         print(f"{'=' * 80}")
@@ -4716,7 +5351,7 @@ class CausalInferenceModel:
         print("  Significance: *** p<0.001, ** p<0.01, * p<0.05")
         print(f"  Correction: {actual_correction} across {len(rows)} outcome{'s' if len(rows) != 1 else ''}")
         print("  HR < 1 = lower hazard of departure (training is protective)")
-        print("  Time interaction models allow treatment effect to vary over time")
+        #print("  Time interaction models allow treatment effect to vary over time")
         print()
 
         # --- Save if requested ---
