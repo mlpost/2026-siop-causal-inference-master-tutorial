@@ -5,7 +5,7 @@ OVERLAP / COMMON SUPPORT DIAGNOSTICS SUMMARY
 OVERALL RECOMMENDATION:
 --------------------------------------------------------------------------------
 Recommended Estimand: ATE
-Next Step Method: ATE via IPTW or doubly robust estimation
+Next Step Method: ATE via IPTW with covariate-adjusted outcome modeling
 
 ================================================================================
 OUTCOME: manager_efficacy_index
