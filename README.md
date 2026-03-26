@@ -31,6 +31,6 @@ This course walks through a real-world people analytics use case: **evaluating w
 
 No local installation required. Everything runs in your browser.
 
-<a href="https://colab.research.google.com/github/mlpost/2026-siop-causal-inference-master-tutorial/blob/main/scenario2_workshop.ipynb" target="_blank" rel="noopener noreferrer">
+<a href="https://colab.research.google.com/github/mlpost/2026-siop-causal-inference-master-tutorial/blob/main/causal_inference_workshop.ipynb" target="_blank" rel="noopener noreferrer">
   <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
 </a>
