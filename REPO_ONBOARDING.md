@@ -152,6 +152,7 @@ Three complementary analysis approaches + reporting utilities:
 | **`build_summary_table()`** | Consolidates GEE results across outcomes with FDR correction |
 | **`build_survival_summary_table()`** | Consolidates survival results (HR, snapshots, optional RMST) |
 | **`compute_evalues_from_results()`** | E-value sensitivity analysis (auto-detects Cohen's d vs risk ratio) |
+| **`compute_confounder_evalue_benchmarks()`** | Calibrates E-values against strongest measured confounders (SMD → RR → E-value) |
 | **`compute_rmst_difference()`** | Restricted mean survival time difference with bootstrap CI |
 | **`generate_gee_summary_report()`** | Markdown narrative report for survey (GEE) outcomes |
 | **`generate_survival_summary_report()`** | Markdown narrative report for survival outcomes (HR, RMST, KM) |
@@ -274,7 +275,10 @@ summary = CausalInferenceModel.build_summary_table(results)
 # 3. E-value sensitivity analysis
 evalues = CausalInferenceModel.compute_evalues_from_results(results)
 
-# 4. Generate markdown report
+# 4. Confounder E-value benchmarks (calibration)
+benchmarks = CausalInferenceModel.compute_confounder_evalue_benchmarks(results, evalue_df=evalues)
+
+# 5. Generate markdown report
 report = CausalInferenceModel.generate_gee_summary_report(summary, evalues, results, ...)
 ```
 
@@ -298,6 +302,7 @@ survival_results['retention'] = causal_model.analyze_survival_effect(
 fig = causal_model.plot_survival_curves(survival_results['retention'], ...)
 summary = CausalInferenceModel.build_survival_summary_table(survival_results)
 evalues = CausalInferenceModel.compute_evalues_from_results(survival_results, effect_type="risk_ratio")
+benchmarks = CausalInferenceModel.compute_confounder_evalue_benchmarks(survival_results, evalue_df=evalues)
 report = CausalInferenceModel.generate_survival_summary_report(summary, evalues, survival_results, survival_plot_fig=fig)
 ```
 
@@ -352,6 +357,7 @@ The script is deterministic (seed=42). Output should be identical across runs on
 | **HR** | Hazard Ratio — the ratio of departure rates; HR < 1 means treatment is protective |
 | **KM** | Kaplan-Meier — non-parametric survival estimator showing retention probability over time |
 | **RMST** | Restricted Mean Survival Time — area under survival curve up to a time horizon (available but unused in notebook) |
+| **Confounder E-value benchmark** | E-value computed from the pre-weighting SMD of a measured covariate, used to calibrate treatment E-values — answers "how much stronger would an unmeasured confounder need to be vs. our strongest measured one?" |
 
 ---
 
