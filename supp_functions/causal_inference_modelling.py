@@ -68,6 +68,9 @@ Post-estimation summaries & sensitivity
         Aggregate survival results with optional RMST columns.
     ``compute_evalue`` / ``compute_evalues_from_results``
         E-value sensitivity analysis (VanderWeele & Ding 2017).
+    ``compute_confounder_evalue_benchmarks``
+        Calibrate E-values against strongest measured confounders
+        (pre-weighting SMD → approximate RR → E-value).
     ``compute_rmst_difference``
         Restricted Mean Survival Time difference (business-friendly metric).
 
@@ -4706,6 +4709,155 @@ class CausalInferenceModel:
         print()
         
         return evalue_df
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def compute_confounder_evalue_benchmarks(
+        results_dict: Dict[str, Dict],
+        evalue_df: Optional[pd.DataFrame] = None,
+        n_top: int = 3,
+    ) -> pd.DataFrame:
+        """
+        Compute E-value benchmarks from the strongest *measured* confounders.
+
+        For each outcome in *results_dict*, the method pulls the pre-weighting
+        balance table (``balance_df``), ranks covariates by absolute
+        Standardised Mean Difference (SMD), and converts the top-*n_top* SMDs
+        to the E-value scale using the Chinn (2000) approximation
+        (RR ≈ exp(0.91 × |SMD|)) followed by the VanderWeele & Ding (2017)
+        E-value formula.
+
+        This puts observed confounders on the same scale as the treatment
+        E-values, answering the calibration question: "How much stronger would
+        an unmeasured confounder need to be compared to the strongest covariate
+        we already controlled for?"
+
+        Parameters
+        ----------
+        results_dict : Dict[str, Dict]
+            Output of ``analyze_treatment_effect()`` or
+            ``analyze_survival_effect()``, keyed by outcome name.  Each value
+            must contain a ``balance_df`` with a ``smd_before_weighting``
+            column.
+        evalue_df : pd.DataFrame, optional
+            The DataFrame returned by ``compute_evalues_from_results()``.
+            If provided, the treatment E-value for each outcome is included
+            in the printed comparison.  If *None*, only confounder benchmarks
+            are shown.
+        n_top : int, default 3
+            Number of strongest confounders to display per outcome.
+
+        Returns
+        -------
+        pd.DataFrame
+            One row per confounder-outcome pair with columns:
+            ``Outcome``, ``Confounder``, ``Rank``, ``SMD_Pre_Weighting``,
+            ``Approx_RR``, ``Confounder_E_Value``.
+        """
+        def _evalue_from_rr(rr: float) -> float:
+            if rr < 1:
+                rr = 1 / rr
+            if rr == 1:
+                return 1.0
+            return rr + np.sqrt(rr * (rr - 1))
+
+        # Build a lookup of treatment E-values if available
+        treatment_evalues: Dict[str, float] = {}
+        if evalue_df is not None and not evalue_df.empty:
+            for _, row in evalue_df.iterrows():
+                treatment_evalues[row["Outcome"]] = row.get("E_Value_Point")
+
+        rows: list = []
+
+        for outcome_name, res in results_dict.items():
+            balance_df = res.get("balance_df")
+            if balance_df is None or balance_df.empty:
+                continue
+
+            # Determine the SMD column (different sources use different names)
+            if "smd_before_weighting" in balance_df.columns:
+                smd_col = "smd_before_weighting"
+            elif "Unweighted SMD" in balance_df.columns:
+                smd_col = "Unweighted SMD"
+            else:
+                continue
+
+            var_col = "variable" if "variable" in balance_df.columns else balance_df.index.name
+
+            work = balance_df.copy()
+            if var_col != "variable":
+                work = work.reset_index()
+                var_col = work.columns[0]
+
+            work["_abs_smd"] = work[smd_col].abs()
+            top = work.nlargest(n_top, "_abs_smd")
+
+            for rank, (_, r) in enumerate(top.iterrows(), start=1):
+                abs_smd = r["_abs_smd"]
+                approx_rr = np.exp(0.91 * abs_smd)
+                confounder_ev = _evalue_from_rr(approx_rr)
+                rows.append({
+                    "Outcome": outcome_name,
+                    "Confounder": r[var_col],
+                    "Rank": rank,
+                    "SMD_Pre_Weighting": round(r[smd_col], 4),
+                    "Approx_RR": round(approx_rr, 4),
+                    "Confounder_E_Value": round(confounder_ev, 2),
+                })
+
+        bench_df = pd.DataFrame(rows)
+        if bench_df.empty:
+            print("  No balance data available — cannot compute confounder benchmarks.")
+            return bench_df
+
+        # ---- Pretty-print comparison ----
+        print("\n" + "=" * 70)
+        print("  CONFOUNDER E-VALUE BENCHMARKS (Calibration)")
+        print("=" * 70)
+        print("  Shows the E-value–equivalent strength of the strongest MEASURED")
+        print("  confounders (pre-weighting SMD → approximate RR → E-value).")
+        print("  An unmeasured confounder would need to exceed these benchmarks")
+        print("  to threaten the treatment conclusion.")
+        print("-" * 70)
+
+        for outcome_name in bench_df["Outcome"].unique():
+            sub = bench_df[bench_df["Outcome"] == outcome_name]
+            treat_ev = treatment_evalues.get(outcome_name)
+
+            print(f"\n  {outcome_name}")
+            if treat_ev is not None:
+                print(f"    Treatment E-value (point): {treat_ev:.2f}")
+            print(f"    {'Confounder':<35s} {'|SMD|':>7s}  {'≈RR':>6s}  {'E-val':>6s}")
+            print(f"    {'─' * 35} {'─' * 7}  {'─' * 6}  {'─' * 6}")
+            for _, r in sub.iterrows():
+                abs_smd = abs(r["SMD_Pre_Weighting"])
+                print(
+                    f"    {r['Confounder']:<35s} {abs_smd:>7.3f}  "
+                    f"{r['Approx_RR']:>6.3f}  {r['Confounder_E_Value']:>6.2f}"
+                )
+
+            if treat_ev is not None:
+                strongest_ev = sub["Confounder_E_Value"].max()
+                if strongest_ev > 1.0 and treat_ev > strongest_ev:
+                    ratio = treat_ev / strongest_ev
+                    print(
+                        f"    → Treatment E-value is {ratio:.1f}× the strongest "
+                        f"measured confounder's E-value."
+                    )
+                elif treat_ev <= strongest_ev:
+                    print(
+                        f"    ⚠️  Treatment E-value ({treat_ev:.2f}) does not exceed "
+                        f"the strongest measured confounder ({strongest_ev:.2f})."
+                    )
+
+        print()
+        print("  Note: Confounder E-values use the Chinn (2000) SMD→RR")
+        print("  approximation (RR ≈ exp(0.91×|SMD|)), same as treatment E-values")
+        print("  for Cohen's d, making the scales directly comparable.")
+        print("=" * 70)
+        print()
+
+        return bench_df
 
     # ==================================================================
     # Summary tables & helper utilities
