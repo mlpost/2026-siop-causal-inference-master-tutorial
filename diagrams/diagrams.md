@@ -4,14 +4,16 @@
 ```mermaid
 timeline
     section Checkpoint 1
-        Context: Study Overview : Research Question : Descriptive Analytics : DAG
+        Context: Study Overview : Research Question : DAG : Descriptive Analytics
     section Checkpoint 2
         Diagnostics : Target Estimand : Multicolinearity : Covariate Overlap : Estimand Confirmation
     section Checkpoint 3
-        Modeling : Weighting & Stabilization : Estimate Treatment Effect : Confirm Balance : Sensitivity Analysis
+        Survey Modeling : Weighting & Stabilization : Estimate Treatment Effect : Confirm Balance : Sensitivity Analysis
     section Checkpoint 4
-        Final Recommendations : Summarize Findings & Limitations : Actionable Recommendations for L&D Team
+        Retention Modeling :  Kaplan-Meier Curves : Cox Time Interactions : RMST
     section Checkpoint 5
+        Final Recommendations : Summarize Findings & Limitations : Actionable Recommendations for L&D Team
+    section Bonus
         Further Learning : Double Machine Learning : Heterogenous Treatment Effects
 ```
 
