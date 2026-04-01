@@ -3627,7 +3627,7 @@ class CausalInferenceModel:
         outcome_col='manager_efficacy_index',
         treatment_col='treatment',
         categorical_vars=['organization', 'job_level'],
-        binary_vars=['is_new_manager'],
+        binary_vars=[],
         continuous_vars=['tenure_years', 'performance_rating'],
         estimand="both",      # Estimate both ATE and ATT
         estimate="both",      # Run both Linear DML and Causal Forest
