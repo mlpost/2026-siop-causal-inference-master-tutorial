@@ -1,0 +1,129 @@
+================================================================================
+OVERLAP / COMMON SUPPORT DIAGNOSTICS SUMMARY
+================================================================================
+
+OVERALL RECOMMENDATION:
+--------------------------------------------------------------------------------
+Recommended Estimand: ATE
+Next Step Method: ATE via IPTW with covariate-adjusted outcome modeling
+
+================================================================================
+OUTCOME: manager_efficacy_index
+================================================================================
+
+SAMPLE COMPOSITION:
+--------------------------------------------------------------------------------
+  Treated:      518
+  Control:     6702
+  Treatment rate: 7.17%
+
+UNIVARIATE BALANCE (SMD):
+--------------------------------------------------------------------------------
+  Total variables:          10
+  Severe imbalance (>0.5):  0 (0.0%)
+  Mean |SMD|:               0.120
+  Max |SMD|:                0.402
+
+MULTIVARIATE OVERLAP (Propensity Score):
+--------------------------------------------------------------------------------
+  Separability AUC:         0.657
+    → Good: Reasonable multivariate overlap
+
+  Common support width:     0.101
+  Treated in overlap:       87.8%
+  Controls in overlap:      93.9%
+
+  ⚠️  63 treated units outside common support!
+     These require EXTRAPOLATION for causal inference.
+
+ASSESSMENT:
+--------------------------------------------------------------------------------
+  Recommendation: PROCEED
+  Confidence:     HIGH
+
+ESTIMAND GUIDANCE:
+--------------------------------------------------------------------------------
+  ✓ Both ATT and ATE may be feasible
+    Choice depends on research question
+
+================================================================================
+OUTCOME: workload_index_mgr
+================================================================================
+
+SAMPLE COMPOSITION:
+--------------------------------------------------------------------------------
+  Treated:      518
+  Control:     6702
+  Treatment rate: 7.17%
+
+UNIVARIATE BALANCE (SMD):
+--------------------------------------------------------------------------------
+  Total variables:          10
+  Severe imbalance (>0.5):  0 (0.0%)
+  Mean |SMD|:               0.118
+  Max |SMD|:                0.402
+
+MULTIVARIATE OVERLAP (Propensity Score):
+--------------------------------------------------------------------------------
+  Separability AUC:         0.658
+    → Good: Reasonable multivariate overlap
+
+  Common support width:     0.103
+  Treated in overlap:       89.4%
+  Controls in overlap:      93.1%
+
+  ⚠️  55 treated units outside common support!
+     These require EXTRAPOLATION for causal inference.
+
+ASSESSMENT:
+--------------------------------------------------------------------------------
+  Recommendation: PROCEED
+  Confidence:     HIGH
+
+ESTIMAND GUIDANCE:
+--------------------------------------------------------------------------------
+  ✓ Both ATT and ATE may be feasible
+    Choice depends on research question
+
+================================================================================
+OUTCOME: stay_intention_index_mgr
+================================================================================
+
+SAMPLE COMPOSITION:
+--------------------------------------------------------------------------------
+  Treated:      518
+  Control:     6702
+  Treatment rate: 7.17%
+
+UNIVARIATE BALANCE (SMD):
+--------------------------------------------------------------------------------
+  Total variables:          10
+  Severe imbalance (>0.5):  0 (0.0%)
+  Mean |SMD|:               0.122
+  Max |SMD|:                0.402
+
+MULTIVARIATE OVERLAP (Propensity Score):
+--------------------------------------------------------------------------------
+  Separability AUC:         0.662
+    → Good: Reasonable multivariate overlap
+
+  Common support width:     0.103
+  Treated in overlap:       88.6%
+  Controls in overlap:      93.5%
+
+  ⚠️  59 treated units outside common support!
+     These require EXTRAPOLATION for causal inference.
+
+ASSESSMENT:
+--------------------------------------------------------------------------------
+  Recommendation: PROCEED
+  Confidence:     HIGH
+
+ESTIMAND GUIDANCE:
+--------------------------------------------------------------------------------
+  ✓ Both ATT and ATE may be feasible
+    Choice depends on research question
+
+================================================================================
+END OF SUMMARY
+================================================================================

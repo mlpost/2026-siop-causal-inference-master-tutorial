@@ -210,7 +210,7 @@ The **nested 3 / 6 / 9 / 12-month** retention structure above is **not** written
 The script prints **expected ballpark** standardized mean differences for verification ([lines 575–597](generate_data.py)). These are **not** definitions of the DGP; they are **diagnostic expectations** under the default seed:
 
 - **Manager efficacy (treated vs control):** ~**0.45–0.55** among Digital; ~**0.30–0.45** among ≤ median tenure (overlap with Digital varies); ~**0.33+** overall (crude SMD).
-- **Stay intention (treated vs control):** ~**0.07**
+- **Stay intention (treated vs control):** ~**0.10**
 
 Use these as loose QC bands when reproducing the pipeline with `SEED = 42`.
 
@@ -339,7 +339,7 @@ Quick reference for **treatment-related** parameters. Scale: survey outcomes use
 | ------- | ----------------------------------- | ---------------------------------------------------------------- | ------------ | ------------------- |
 | `manager_efficacy_index` | **0.33** | **Digital:** +0.15; **tenure ≤ sample median:** +0.10 | 0.60 | Training has a **positive** impact on manager efficacy ratings, **especially** for **Digital** orgs and for managers with **tenure at or below** the sample median. Calibrated so IPTW marginal Cohen’s *d* supports **moderate** E-values (~2–3). |
 | `workload_index_mgr` | **0** | — | 0.45 | **No** direct treatment effect on workload (outcome driven by prior-year workload and noise); use for **null** / balance checks in IPTW + GEE. |
-| `stay_intention_index_mgr` | **0.07** | — | 0.50 | A **small** positive treatment association with stay intention; calibrated for **very weak** E-values (under ~1.5) while remaining detectable at large *N*. |
+| `stay_intention_index_mgr` | **0.10** | — | 0.50 | A **small** positive treatment association with stay intention; calibrated so marginal IPTW E-values land in the **weak** band (~1.5–2.0) while remaining detectable at large *N*. |
 
 **Observation rule:** All three are **missing** if the manager does not survive through **6** months (`retention_6month == 0`); see §6.
 

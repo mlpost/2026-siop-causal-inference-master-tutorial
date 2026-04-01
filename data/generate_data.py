@@ -245,13 +245,13 @@ workload_manager = generate_outcome_with_baseline(
 )
 print("  [OK] workload_index_mgr      (d0, no direct treatment effect)")
 
-# --- Stay Intention Index (Manager): small positive effect (latent d 0.102; IPTW d <0.2, E-value ≥1.5 "Weak")
+# --- Stay Intention Index (Manager): small positive effect (latent d 0.10; IPTW E-value "Weak" 1.5-2.0, not "Very weak")
 stay_intention_manager = generate_outcome_with_baseline(
-    base_mean=2.8, base_sd=1.00, treatment_effect_d=0.102,
+    base_mean=2.8, base_sd=1.00, treatment_effect_d=0.10,
     treatment=treatment, baseline=baseline_stay_intention,
     baseline_r=0.50,
 )
-print("  [OK] stay_intention_index_mgr (latent d0.102; IPTW E-value Weak, d<0.2)")
+print("  [OK] stay_intention_index_mgr (d0.10; IPTW E-value Weak band)")
 
 # ============================================================================
 # SECTION 7: GENERATE MANAGER RETENTION OUTCOMES
