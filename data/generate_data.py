@@ -11,7 +11,6 @@ Design: Open enrollment - voluntary participation with self-selection bias
 - Control: ~8,500 managers who did not participate
 - Self-selection driven by Organization and performance rating
 - No Below / Far Below performers are treated
-- ~25 % of managers are new (baseline_manager_efficacy set to 0)
 - Managers grouped into within-organization teams (team_id) for clustered SEs
 
 Author: Generated for Statistics Tutorial
@@ -80,48 +79,29 @@ performance = np.random.choice(PERFORMANCE_RATINGS, size=N_TOTAL, p=perf_probs)
 gender_probs = [0.48, 0.48, 0.04]
 genders = np.random.choice(GENDERS, size=N_TOTAL, p=gender_probs)
 
-ages = np.random.normal(38, 6, N_TOTAL).clip(28, 55).round().astype(int)
-tenures = np.random.gamma(3, 4, N_TOTAL).clip(1, 36).round().astype(int)
+ages = np.random.normal(38, 6, N_TOTAL).clip(25, 60).round().astype(int)
+tenures = np.random.gamma(3, 4, N_TOTAL).clip(1, 120).round().astype(int)
 
 print(f"[OK] Generated demographics for {N_TOTAL} managers")
 
 # ============================================================================
-# SECTION 3: NEW MANAGER FLAG
-# ============================================================================
-
-print("\nGenerating new-manager flag (~25 %)...")
-
-# New managers are more likely among short-tenure individuals.
-# P(new_manager) = logistic( intercept + slope * (12 - tenure) )   ~25 % overall
-prob_new = expit(-1.3 + 0.12 * (12 - tenures))
-is_new_manager = (np.random.uniform(size=N_TOTAL) < prob_new).astype(int)
-
-pct_new = is_new_manager.mean() * 100
-print(f"[OK] {is_new_manager.sum()} managers flagged as new ({pct_new:.1f} %)")
-
-# ============================================================================
-# SECTION 4: GENERATE PRIOR-YEAR BASELINE SCORES
+# SECTION 3: GENERATE PRIOR-YEAR BASELINE SCORES
 # ============================================================================
 
 print("\nGenerating prior-year baseline scores...")
 
 def generate_baseline(base_mean, base_sd, n):
-    """Generate a baseline score (1-5) as an independent draw."""
+    """Generate a baseline score (1-5) as an independent draw; two decimals."""
     scores = np.random.normal(base_mean, base_sd, n)
-    return np.clip(np.round(scores, 1), SURVEY_MIN, SURVEY_MAX)
+    return np.clip(np.round(scores, 2), SURVEY_MIN, SURVEY_MAX)
 
-# Manager-level baselines (0 for new managers)
-baseline_manager_efficacy_raw = generate_baseline(3.3, 0.85, N_TOTAL)
+baseline_manager_efficacy = generate_baseline(3.3, 0.85, N_TOTAL)
+baseline_workload = generate_baseline(3.0, 0.95, N_TOTAL)
+baseline_stay_intention = generate_baseline(2.7, 1.00, N_TOTAL)
 
-baseline_manager_efficacy = np.where(is_new_manager == 1, 0, baseline_manager_efficacy_raw)
-
-# Individual-level baselines (all managers have these - measured as IC before promotion)
-baseline_workload           = generate_baseline(3.1, 0.95, N_TOTAL)
-baseline_turnover_intention = generate_baseline(2.7, 1.00, N_TOTAL)
-
-print(f"  baseline_manager_efficacy : {baseline_manager_efficacy.mean():.2f} (zero count: {(baseline_manager_efficacy == 0).sum()})")
+print(f"  baseline_manager_efficacy : {baseline_manager_efficacy.mean():.2f}")
 print(f"  baseline_workload         : {baseline_workload.mean():.2f}")
-print(f"  baseline_turnover_intention: {baseline_turnover_intention.mean():.2f}")
+print(f"  baseline_stay_intention   : {baseline_stay_intention.mean():.2f}")
 
 # ============================================================================
 # SECTION 5: SELF-SELECTION INTO TREATMENT
@@ -191,7 +171,8 @@ print("=" * 80)
 
 def generate_outcome_with_baseline(base_mean, base_sd, treatment_effect_d,
                                    treatment, baseline, baseline_r=0.50,
-                                   hetero_mask=None, hetero_extra_d=0.0):
+                                   hetero_mask=None, hetero_extra_d=0.0,
+                                   hetero_mask_2=None, hetero_extra_d_2=0.0):
     """
     Generate an outcome (1-5) that is correlated with its baseline score
     AND has an independent treatment effect on top.
@@ -206,6 +187,8 @@ def generate_outcome_with_baseline(base_mean, base_sd, treatment_effect_d,
     baseline_r      : year-over-year correlation (outcome | baseline)
     hetero_mask     : boolean mask for subgroup with extra effect
     hetero_extra_d  : additional Cohen's d for the subgroup
+    hetero_mask_2   : optional second subgroup mask (same scale as hetero_mask)
+    hetero_extra_d_2: additional Cohen's d for the second subgroup
     """
     n = len(treatment)
 
@@ -217,9 +200,13 @@ def generate_outcome_with_baseline(base_mean, base_sd, treatment_effect_d,
     baseline_component = baseline_r * bl_centered
     treatment_effect = treatment_effect_d * base_sd * treatment
 
-    # Heterogeneous treatment effect (e.g. stronger for R&D)
+    # Heterogeneous treatment effect (e.g. stronger for Digital; optional second mask)
     if hetero_mask is not None:
         treatment_effect = treatment_effect + hetero_extra_d * base_sd * treatment * hetero_mask
+    if hetero_mask_2 is not None:
+        treatment_effect = (
+            treatment_effect + hetero_extra_d_2 * base_sd * treatment * hetero_mask_2
+        )
 
     residual_sd = base_sd * np.sqrt(1 - baseline_r ** 2)
     noise = np.random.normal(0, residual_sd, n)
@@ -229,36 +216,42 @@ def generate_outcome_with_baseline(base_mean, base_sd, treatment_effect_d,
     return scores
 
 
-# R&D heterogeneity mask
-is_rnd = (organizations == 'R&D').astype(float)
+# Digital heterogeneity mask (stronger efficacy treatment in Digital org)
+is_digital = (organizations == 'Digital').astype(float)
 
-# --- Manager Efficacy Index: d  0.50, significant, moderate  (R&D: +0.15)
+# Stronger efficacy treatment effect when tenure is at or below sample median
+tenure_median = float(np.median(tenures))
+is_low_tenure = (tenures <= tenure_median).astype(float)
+
+# --- Manager Efficacy Index: base d 0.33 (IPTW marginal d ~0.35+ → E-value ~2–3);
+#     Digital +0.15; tenure<=median +0.10
 manager_efficacy = generate_outcome_with_baseline(
-    base_mean=3.4, base_sd=0.90, treatment_effect_d=0.50,
-    treatment=treatment, baseline=baseline_manager_efficacy_raw,
-    baseline_r=0.50,
-    hetero_mask=is_rnd, hetero_extra_d=0.15
+    base_mean=3.4, base_sd=0.90, treatment_effect_d=0.33,
+    treatment=treatment, baseline=baseline_manager_efficacy,
+    baseline_r=0.60,
+    hetero_mask=is_digital, hetero_extra_d=0.15,
+    hetero_mask_2=is_low_tenure, hetero_extra_d_2=0.10,
 )
-print("  [OK] manager_efficacy_index  (d0.50, R&D extra +0.15)")
+print(
+    f"  [OK] manager_efficacy_index  (d0.33, Digital extra +0.15, "
+    f"tenure<=median +0.10; median tenure={tenure_median:.0f} mo)"
+)
 
-# --- Workload Index (Manager): d  0.02, non-significant
-# (Training doesn't meaningfully affect perceived workload)
+# --- Workload Index (Manager): no treatment effect (d 0; outcome = baseline + noise)
 workload_manager = generate_outcome_with_baseline(
-    base_mean=3.2, base_sd=1.00, treatment_effect_d=0.02,
+    base_mean=3.2, base_sd=1.00, treatment_effect_d=0.0,
     treatment=treatment, baseline=baseline_workload,
     baseline_r=0.45
 )
-print("  [OK] workload_index_mgr      (d0.02, ns)")
+print("  [OK] workload_index_mgr      (d0, no direct treatment effect)")
 
-# --- Turnover Intention Index (Manager): d  0.25, significant, small
-#     New managers get extra +0.20 d (total ~0.45 for new managers)
-turnover_intention_manager = generate_outcome_with_baseline(
-    base_mean=2.8, base_sd=1.00, treatment_effect_d=0.25,
-    treatment=treatment, baseline=baseline_turnover_intention,
+# --- Stay Intention Index (Manager): small positive effect (latent d 0.102; IPTW d <0.2, E-value ≥1.5 "Weak")
+stay_intention_manager = generate_outcome_with_baseline(
+    base_mean=2.8, base_sd=1.00, treatment_effect_d=0.102,
+    treatment=treatment, baseline=baseline_stay_intention,
     baseline_r=0.50,
-    hetero_mask=is_new_manager.astype(float), hetero_extra_d=0.20
 )
-print("  [OK] turnover_intention_mgr  (d0.25, new mgr extra +0.20)")
+print("  [OK] stay_intention_index_mgr (latent d0.102; IPTW E-value Weak, d<0.2)")
 
 # ============================================================================
 # SECTION 7: GENERATE MANAGER RETENTION OUTCOMES
@@ -267,42 +260,26 @@ print("  [OK] turnover_intention_mgr  (d0.25, new mgr extra +0.20)")
 print("\nGenerating manager retention outcomes...")
 
 def generate_retention_with_baseline(base_rate, treatment_or, treatment,
-                                     baseline_turnover_intent,
-                                     hetero_mask=None, hetero_extra_or=1.0):
+                                     baseline_stay_intent):
     """
     Generate binary retention with treatment OR and a baseline covariate effect.
-    Higher baseline turnover_intention (= more intention to stay) -> higher retention.
-
-    Parameters
-    ----------
-    hetero_mask     : boolean/int mask for subgroup with extra effect
-    hetero_extra_or : multiplicative OR boost for the subgroup
-                      e.g. 1.5 means the subgroup OR = treatment_or * 1.5
+    Higher baseline_stay_intention (= more intention to stay) -> higher retention.
     """
     base_logit = np.log(base_rate / (1 - base_rate))
     treat_logit = np.log(treatment_or)
 
-    # Heterogeneous treatment effect for subgroup (additive on log-odds scale)
-    hetero_logit = 0.0
-    if hetero_mask is not None:
-        hetero_logit = np.log(hetero_extra_or) * hetero_mask
-
     # Centre baseline and add as linear predictor (odds-scale influence)
-    bl_centered = baseline_turnover_intent - baseline_turnover_intent.mean()
+    bl_centered = baseline_stay_intent - baseline_stay_intent.mean()
     bl_effect = 0.30 * bl_centered  # moderate baseline influence
 
-    logits = base_logit + (treat_logit + hetero_logit) * treatment + bl_effect
+    logits = base_logit + treat_logit * treatment + bl_effect
     probs = expit(logits)
     return (np.random.uniform(size=len(treatment)) < probs).astype(int)
 
-# New-manager heterogeneity mask for retention/turnover
-is_new = is_new_manager.astype(float)
-
-# 3-month: OR  2.0 (significant, moderate); new managers OR - 1.5  3.0
+# 3-month: base_rate 0.90, OR 2.0, baseline stay intention coefficient 0.30
 retention_3mo = generate_retention_with_baseline(
     base_rate=0.90, treatment_or=2.0, treatment=treatment,
-    baseline_turnover_intent=baseline_turnover_intention,
-    hetero_mask=is_new, hetero_extra_or=1.5
+    baseline_stay_intent=baseline_stay_intention,
 )
 
 # 6-month: CONDITIONAL on surviving to 3 months
@@ -331,6 +308,14 @@ assert (retention_6mo  <= retention_3mo).all(),  "ERROR: non-monotonic 36 mo!"
 assert (retention_9mo  <= retention_6mo).all(),  "ERROR: non-monotonic 69 mo!"
 assert (retention_12mo <= retention_9mo).all(),  "ERROR: non-monotonic 912 mo!"
 print("  [OK] Retention monotonicity verified")
+
+# Internal-only retention flags (not exported to CSV; used for exit_date + descriptives)
+_retention_arrays = {
+    'retention_3month': retention_3mo,
+    'retention_6month': retention_6mo,
+    'retention_9month': retention_9mo,
+    'retention_12month': retention_12mo,
+}
 
 # --- exit_date: yyyy-mm-dd for leavers, blank for retained managers ---
 print("\nGenerating exit_date column...")
@@ -384,6 +369,18 @@ n_leavers_total = (exit_quarter >= 0).sum()
 n_retained = (exit_quarter == -1).sum()
 print(f"  [OK] exit_date generated: {n_leavers_total} leavers, {n_retained} retained (blank)")
 
+# Survey outcomes (Likert) are not observed for managers who leave by the 6-month mark
+# (retention_6mo == 0 covers both Q1 and Q2 leavers). Later leavers still have responses.
+survey_missing_6mo = (retention_6mo == 0)
+manager_efficacy = manager_efficacy.astype(float)
+workload_manager = workload_manager.astype(float)
+stay_intention_manager = stay_intention_manager.astype(float)
+manager_efficacy[survey_missing_6mo] = np.nan
+workload_manager[survey_missing_6mo] = np.nan
+stay_intention_manager[survey_missing_6mo] = np.nan
+n_blank_survey = int(survey_missing_6mo.sum())
+print(f"  [OK] Survey outcomes set to missing for {n_blank_survey} managers (no 6-mo retention)")
+
 # ============================================================================
 # SECTION 8: ASSEMBLE MANAGER DATAFRAME
 # ============================================================================
@@ -436,21 +433,16 @@ df_managers = pd.DataFrame({
     'gender': genders,
     'age': ages,
     'tenure_months': tenures,
-    'is_new_manager': is_new_manager,
     'num_direct_reports': num_direct_reports,
     'tot_span_of_control': tot_span_of_control,
     'baseline_manager_efficacy': baseline_manager_efficacy,
     'baseline_workload': baseline_workload,
-    'baseline_turnover_intention': baseline_turnover_intention,
+    'baseline_stay_intention': baseline_stay_intention,
     'propensity_score': np.round(propensity_scores, 4),
-    'retention_3month': retention_3mo,
-    'retention_6month': retention_6mo,
-    'retention_9month': retention_9mo,
-    'retention_12month': retention_12mo,
     'exit_date': exit_dates,
     'manager_efficacy_index': manager_efficacy,
     'workload_index_mgr': workload_manager,
-    'turnover_intention_index_mgr': turnover_intention_manager,
+    'stay_intention_index_mgr': stay_intention_manager,
 })
 
 print(f"\n[OK] Manager dataframe assembled: {df_managers.shape}")
@@ -481,17 +473,10 @@ for rating, row in perf_rates.iterrows():
     bar = '-' * int(row['rate'] * 40)
     print(f"  {rating:20s}  {row['rate']:.1%}  ({int(row['n_treated']):>3}/{int(row['n_total']):>4})  {bar}")
 
-# Treatment rates by new-manager status
-print("\nTreatment rate by new-manager status:")
-for flag, label in [(0, 'Experienced'), (1, 'New Manager')]:
-    subset = df_managers[df_managers['is_new_manager'] == flag]
-    rate = subset['treatment'].mean()
-    print(f"  {label:20s}  {rate:.1%}  ({subset['treatment'].sum()}/{len(subset)})")
-
 # Baseline means by treatment
 print("\nBaseline means by treatment group:")
 bl_vars = ['baseline_manager_efficacy', 'baseline_workload',
-           'baseline_turnover_intention']
+           'baseline_stay_intention']
 for var in bl_vars:
     t_mean = df_managers[df_managers['treatment'] == 1][var].mean()
     c_mean = df_managers[df_managers['treatment'] == 0][var].mean()
@@ -545,16 +530,16 @@ print("=" * 80)
 
 print("\n--- MANAGER OUTCOMES ---")
 print("\nRetention Rates by Treatment Group:")
-for outcome in ['retention_3month', 'retention_6month', 'retention_9month', 'retention_12month']:
-    t_rate = df_managers[df_managers['treatment'] == 1][outcome].mean()
-    c_rate = df_managers[df_managers['treatment'] == 0][outcome].mean()
+for outcome, arr in _retention_arrays.items():
+    t_rate = arr[treatment == 1].mean()
+    c_rate = arr[treatment == 0].mean()
     print(f"  {outcome}: Treated = {t_rate:.1%}, Control = {c_rate:.1%}, Diff = {(t_rate-c_rate)*100:+.1f} pp")
 
 print("\nSurvey Outcomes by Treatment Group (Mean +/- SD):")
-survey_outcomes_mgr = ['manager_efficacy_index', 'workload_index_mgr', 'turnover_intention_index_mgr']
+survey_outcomes_mgr = ['manager_efficacy_index', 'workload_index_mgr', 'stay_intention_index_mgr']
 for outcome in survey_outcomes_mgr:
-    t = df_managers[df_managers['treatment'] == 1][outcome]
-    c = df_managers[df_managers['treatment'] == 0][outcome]
+    t = df_managers[df_managers['treatment'] == 1][outcome].dropna()
+    c = df_managers[df_managers['treatment'] == 0][outcome].dropna()
     print(f"  {outcome}:")
     print(f"    Treated:  {t.mean():.2f}  {t.std():.2f}")
     print(f"    Control:  {c.mean():.2f}  {c.std():.2f}")
@@ -569,8 +554,8 @@ print("=" * 80)
 
 print("\n--- MANAGER-LEVEL SURVEY OUTCOMES (t-tests) ---")
 for outcome in survey_outcomes_mgr:
-    t = df_managers[df_managers['treatment'] == 1][outcome]
-    c = df_managers[df_managers['treatment'] == 0][outcome]
+    t = df_managers[df_managers['treatment'] == 1][outcome].dropna()
+    c = df_managers[df_managers['treatment'] == 0][outcome].dropna()
     t_stat, p_val = stats.ttest_ind(t, c)
     d = smd_continuous(t, c)
     sig = '***' if p_val < 0.001 else '**' if p_val < 0.01 else '*' if p_val < 0.05 else 'ns'
@@ -580,50 +565,37 @@ for outcome in survey_outcomes_mgr:
 
 print("\n--- MANAGER RETENTION (Logistic Regression) ---")
 from sklearn.linear_model import LogisticRegression
-for outcome in ['retention_3month', 'retention_6month', 'retention_9month', 'retention_12month']:
+for outcome, arr in _retention_arrays.items():
     X = df_managers[['treatment']].values
-    y = df_managers[outcome].values
+    y = arr
     model = LogisticRegression(max_iter=1000)
     model.fit(X, y)
     or_val = np.exp(model.coef_[0][0])
     print(f"  {outcome}:  OR = {or_val:.2f}")
 
-# R&D heterogeneity check (Manager Efficacy)
-print("\n--- R&D HETEROGENEITY CHECK (Manager Efficacy) ---")
-rnd_t = df_managers[(df_managers['treatment'] == 1) & (df_managers['organization'] == 'R&D')]['manager_efficacy_index']
-rnd_c = df_managers[(df_managers['treatment'] == 0) & (df_managers['organization'] == 'R&D')]['manager_efficacy_index']
-oth_t = df_managers[(df_managers['treatment'] == 1) & (df_managers['organization'] != 'R&D')]['manager_efficacy_index']
-oth_c = df_managers[(df_managers['treatment'] == 0) & (df_managers['organization'] != 'R&D')]['manager_efficacy_index']
-d_rnd = smd_continuous(rnd_t, rnd_c)
-d_oth = smd_continuous(oth_t, oth_c)
-print(f"  R&D managers      :  d = {d_rnd:.3f}  (expected ~0.65)")
-print(f"  Non-R&D managers  :  d = {d_oth:.3f}  (expected ~0.50)")
+# Manager efficacy heterogeneity (ground truth §10)
+print("\n--- MANAGER EFFICACY (treated vs control, Cohen's d) ---")
+me_t = df_managers[df_managers['treatment'] == 1]['manager_efficacy_index'].dropna()
+me_c = df_managers[df_managers['treatment'] == 0]['manager_efficacy_index'].dropna()
+d_overall = smd_continuous(me_t, me_c)
+print(f"  Overall              :  d = {d_overall:.3f}  (expected ~0.33+ crude SMD)")
 
-# New-manager heterogeneity check (Turnover Intention + Retention)
-print("\n--- NEW-MANAGER HETEROGENEITY CHECK ---")
-print("\n  Turnover Intention Index:")
-new_t = df_managers[(df_managers['treatment'] == 1) & (df_managers['is_new_manager'] == 1)]['turnover_intention_index_mgr']
-new_c = df_managers[(df_managers['treatment'] == 0) & (df_managers['is_new_manager'] == 1)]['turnover_intention_index_mgr']
-exp_t = df_managers[(df_managers['treatment'] == 1) & (df_managers['is_new_manager'] == 0)]['turnover_intention_index_mgr']
-exp_c = df_managers[(df_managers['treatment'] == 0) & (df_managers['is_new_manager'] == 0)]['turnover_intention_index_mgr']
-d_new = smd_continuous(new_t, new_c)
-d_exp = smd_continuous(exp_t, exp_c)
-print(f"    New managers        :  d = {d_new:.3f}  (expected ~0.45)")
-print(f"    Experienced managers:  d = {d_exp:.3f}  (expected ~0.25)")
+dig_t = df_managers[(df_managers['treatment'] == 1) & (df_managers['organization'] == 'Digital')]['manager_efficacy_index'].dropna()
+dig_c = df_managers[(df_managers['treatment'] == 0) & (df_managers['organization'] == 'Digital')]['manager_efficacy_index'].dropna()
+d_dig = smd_continuous(dig_t, dig_c)
+print(f"  Digital org only     :  d = {d_dig:.3f}  (expected ~0.45-0.55)")
 
-print("\n  3-Month Retention Rate:")
-for flag, label in [(1, 'New managers'), (0, 'Experienced')]:
-    sub = df_managers[df_managers['is_new_manager'] == flag]
-    tr = sub[sub['treatment'] == 1]['retention_3month'].mean()
-    cr = sub[sub['treatment'] == 0]['retention_3month'].mean()
-    print(f"    {label:22s}  Treated: {tr:.1%}  Control: {cr:.1%}  Diff = {(tr-cr)*100:+.1f} pp")
+low_mask = df_managers['tenure_months'] <= tenure_median
+lt_t = df_managers[low_mask & (df_managers['treatment'] == 1)]['manager_efficacy_index'].dropna()
+lt_c = df_managers[low_mask & (df_managers['treatment'] == 0)]['manager_efficacy_index'].dropna()
+d_low_ten = smd_continuous(lt_t, lt_c)
+print(f"  Tenure <= median only :  d = {d_low_ten:.3f}  (expected ~0.30-0.45)")
 
-print("\n  12-Month Retention Rate:")
-for flag, label in [(1, 'New managers'), (0, 'Experienced')]:
-    sub = df_managers[df_managers['is_new_manager'] == flag]
-    tr = sub[sub['treatment'] == 1]['retention_12month'].mean()
-    cr = sub[sub['treatment'] == 0]['retention_12month'].mean()
-    print(f"    {label:22s}  Treated: {tr:.1%}  Control: {cr:.1%}  Diff = {(tr-cr)*100:+.1f} pp")
+print("\n--- STAY INTENTION (treated vs control, Cohen's d) ---")
+si_t = df_managers[df_managers['treatment'] == 1]['stay_intention_index_mgr'].dropna()
+si_c = df_managers[df_managers['treatment'] == 0]['stay_intention_index_mgr'].dropna()
+d_si = smd_continuous(si_t, si_c)
+print(f"  stay_intention_index_mgr:  d = {d_si:.3f}  (crude SMD; IPTW marginal d ~0.13–0.16)")
 
 # ============================================================================
 # SECTION 14: EXPORT DATA
@@ -633,10 +605,10 @@ print("\n" + "=" * 80)
 print("EXPORTING DATA")
 print("=" * 80)
 
-df_managers.to_csv('./data/manager_data.csv', index=False)
+df_managers.to_csv('./manager_data.csv', index=False)
 
 print("\n[OK] Data exported to:")
-print("  - ./data/manager_data.csv")
+print("  - ./manager_data.csv")
 
 # ============================================================================
 # SECTION 15: EXCEL REPORT
@@ -769,7 +741,7 @@ def descriptives_by_group(df, variables, group_col='treatment',
 # ---------------------------------------------------------------------------
 # Create workbook
 # ---------------------------------------------------------------------------
-EXCEL_PATH = './data/data_descriptives.xlsx'
+EXCEL_PATH = './data_descriptives.xlsx'
 wb = Workbook()
 
 # ===== SHEET 1: README =====================================================
@@ -788,17 +760,15 @@ readme_lines = [
     ("Design", BOLD_FONT),
     (f" Treated group: {n_treated_actual} managers who voluntarily enrolled (Jan-Mar)", None),
     (f" Control pool : {n_control_actual} managers who did not participate", None),
-    (f" ~{int(is_new_manager.sum())} managers flagged as new (no prior manager-level baselines)", None),
     (" Self-selection driven by: Organisation, performance rating", None),
     (" Seed for reproducibility: 42", None),
     ("", None),
     (" Prior-year baseline scores included as controls for outcomes", None),
-    (" New managers have 0 for baseline_manager_efficacy", None),
     (" No Below / Far Below performers are treated", None),
     ("", None),
     ("Sheets in This Workbook", BOLD_FONT),
     (" README - This summary sheet", None),
-    (" Selection_Patterns - Treatment rates by organisation, performance, new-mgr status", None),
+    (" Selection_Patterns - Treatment rates by organisation and performance rating", None),
     (" Covariate_Balance - SMDs for all covariates (pre-weighting)", None),
     (" PS_Summary - Propensity score distribution statistics", None),
     (" Manager_Descriptives - Descriptive stats by treatment group", None),
@@ -846,20 +816,6 @@ row_ptr = 3
 write_title(ws_sel, row_ptr, "By Organisation", max_col=4)
 row_ptr = write_df(ws_sel, df_sel_org, start_row=row_ptr + 2) + 2
 
-# By New-Manager Status
-sel_new_rows = []
-for flag, label in [(0, 'Experienced'), (1, 'New Manager')]:
-    sub = df_managers[df_managers['is_new_manager'] == flag]
-    n_t = sub['treatment'].sum()
-    n_total = len(sub)
-    sel_new_rows.append({
-        'Status': label, 'n Treated': int(n_t), 'n Total': int(n_total),
-        'Participation Rate %': round(n_t / n_total * 100, 1)
-    })
-df_sel_new = pd.DataFrame(sel_new_rows)
-write_title(ws_sel, row_ptr, "By New-Manager Status", max_col=4)
-row_ptr = write_df(ws_sel, df_sel_new, start_row=row_ptr + 2) + 2
-
 # By Performance Rating
 sel_perf_rows = []
 for rating in PERFORMANCE_RATINGS:
@@ -887,7 +843,7 @@ cov_bal_rows = []
 # Continuous
 for var in ['age', 'tenure_months', 'num_direct_reports', 'tot_span_of_control',
             'baseline_manager_efficacy', 'baseline_workload',
-            'baseline_turnover_intention']:
+            'baseline_stay_intention']:
     tv = t_df[var].dropna()
     cv = c_df[var].dropna()
     s = smd_continuous(tv, cv)
@@ -902,11 +858,8 @@ for var in ['age', 'tenure_months', 'num_direct_reports', 'tot_span_of_control',
     })
 
 # Categorical - proportion difference as SMD
-for var in ['organization', 'region', 'performance_rating', 'gender', 'is_new_manager']:
-    if var == 'is_new_manager':
-        dummies = pd.DataFrame({var: df_managers[var]})
-    else:
-        dummies = pd.get_dummies(df_managers[var], prefix=var)
+for var in ['organization', 'region', 'performance_rating', 'gender']:
+    dummies = pd.get_dummies(df_managers[var], prefix=var)
     for col in dummies.columns:
         tv = dummies.loc[treatment == 1, col].astype(float)
         cv = dummies.loc[treatment == 0, col].astype(float)
@@ -951,8 +904,8 @@ print("  [OK] PS_Summary")
 ws_mgr_desc = wb.create_sheet("Manager_Descriptives")
 mgr_cont_vars = ['age', 'tenure_months', 'num_direct_reports', 'tot_span_of_control',
                   'baseline_manager_efficacy', 'baseline_workload',
-                  'baseline_turnover_intention',
-                  'manager_efficacy_index', 'workload_index_mgr', 'turnover_intention_index_mgr']
+                  'baseline_stay_intention',
+                  'manager_efficacy_index', 'workload_index_mgr', 'stay_intention_index_mgr']
 df_mgr_desc = descriptives_by_group(df_managers, mgr_cont_vars)
 write_title(ws_mgr_desc, 1, "Manager-Level Descriptive Statistics (Continuous & Likert Variables)", max_col=len(df_mgr_desc.columns))
 write_df(ws_mgr_desc, df_mgr_desc, start_row=3)
@@ -966,9 +919,10 @@ write_title(ws_ret, 1, "Retention Rates by Treatment Group with Chi-Square Tests
 ret_rows = []
 for outcome, label in [('retention_3month', '3-Month'), ('retention_6month', '6-Month'),
                         ('retention_9month', '9-Month'), ('retention_12month', '12-Month')]:
-    t_vals = df_managers[df_managers['treatment'] == 1][outcome]
-    c_vals = df_managers[df_managers['treatment'] == 0][outcome]
-    ct = pd.crosstab(df_managers['treatment'], df_managers[outcome])
+    arr = _retention_arrays[outcome]
+    t_vals = arr[treatment == 1]
+    c_vals = arr[treatment == 0]
+    ct = pd.crosstab(df_managers['treatment'], pd.Series(arr))
     chi2, p_val, _, _ = stats.chi2_contingency(ct)
     ret_rows.append({
         'Timepoint': label,
@@ -1004,8 +958,9 @@ for i, (col, lbl) in enumerate([
     ('retention_3month', '0-3 Months'), ('retention_6month', '3-6 Months'),
     ('retention_9month', '6-9 Months'),  ('retention_12month', '9-12 Months')]):
 
-    curr_t = int(t_mgr[col].sum())
-    curr_c = int(c_mgr[col].sum())
+    arr = _retention_arrays[col]
+    curr_t = int(arr[treatment == 1].sum())
+    curr_c = int(arr[treatment == 0].sum())
     lost_t = prev_t_retained - curr_t
     lost_c = prev_c_retained - curr_c
     rate_t = lost_t / prev_t_retained * 100 if prev_t_retained > 0 else 0
@@ -1042,8 +997,8 @@ write_title(ws_mgr_out, 1, "Manager-Level Survey Outcomes  Treatment vs Control"
 
 mgr_out_rows = []
 for outcome in survey_outcomes_mgr:
-    t_vals = df_managers[df_managers['treatment'] == 1][outcome]
-    c_vals = df_managers[df_managers['treatment'] == 0][outcome]
+    t_vals = df_managers[df_managers['treatment'] == 1][outcome].dropna()
+    c_vals = df_managers[df_managers['treatment'] == 0][outcome].dropna()
     t_stat, p_val = stats.ttest_ind(t_vals, c_vals)
     d = smd_continuous(t_vals, c_vals)
     mgr_out_rows.append({
@@ -1079,6 +1034,6 @@ print("\n" + "=" * 80)
 print("DATA GENERATION COMPLETE")
 print("=" * 80)
 print(f"\nFiles created:")
-print(f"  ./data/manager_data.csv        ({df_managers.shape[0]} rows x {df_managers.shape[1]} cols)")
-print(f"  ./data/data_descriptives.xlsx  (8 sheets)")
+print(f"  ./manager_data.csv        ({df_managers.shape[0]} rows x {df_managers.shape[1]} cols)")
+print(f"  ./data_descriptives.xlsx  (8 sheets)")
 

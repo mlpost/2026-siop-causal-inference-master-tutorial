@@ -10,11 +10,11 @@ This is a **workshop/tutorial codebase** for teaching causal inference methods a
 
 | Component | Purpose |
 |---|---|
-| `s2_generate_data.py` | Deterministic synthetic data generator (seed=42). Produces manager-level CSV + Excel descriptives. Run standalone to regenerate `data/`. |
-| `scenario2_workshop.ipynb` | Main teaching notebook. Walks through the full causal inference pipeline interactively. |
+| `data/generate_data.py` | Deterministic synthetic data generator (seed=42). Produces manager-level CSV + Excel descriptives. Run standalone from repo root to regenerate `data/`. |
+| `causal_inference_workshop.ipynb` | Main teaching notebook. Walks through the full causal inference pipeline interactively. |
 | `supp_functions/causal_diagnostics.py` | `CausalDiagnostics` class — pre-modeling checks (VIF, intercorrelations, overlap), covariate balance (SMD), propensity score visualization. |
 | `supp_functions/causal_inference_modelling.py` | `CausalInferenceModel` class (aliased as `IPTWGEEModel` for backward compatibility) — three approaches: (1) IPTW + covariate-adjusted GEE for continuous/binary outcomes, (2) IPTW + Cox PH with time interaction for time-to-event survival outcomes via `lifelines`, (3) Double Machine Learning using `doubleml` for cluster-robust ATE robustness checks and `econml` for CATE exploration. Also includes E-value sensitivity, RMST, Markdown report generation, and summary tables. Shared IPTW infrastructure is factored into `_prepare_iptw_data()`. Module has a comprehensive docstring cataloguing all public methods by category. |
-| `data/s2_manager_data.csv` | Pre-generated manager-level dataset (9000 rows). |
+| `data/manager_data.csv` | Pre-generated manager-level dataset (9000 rows). |
 | `pregenereated_results/s2/` | Reference diagnostic outputs for comparison. |
 | `results/` | Output directory for workshop-generated results (Excel, plots). |
 
@@ -35,7 +35,7 @@ Import path relies on `sys.path.append('./supp_functions')` — there is no pack
 ### Analysis pipeline
 The notebook runs two distinct outcome families, then optional HTE exploration:
 
-**Survey outcomes (continuous):** `manager_efficacy_index`, `workload_index_mgr`, `turnover_intention_index_mgr`
+**Survey outcomes (continuous):** `manager_efficacy_index`, `workload_index_mgr`, `stay_intention_index_mgr`
 1. **Pre-modeling diagnostics** — `cd.check_vif()`, `cd.check_high_intercorrelations()`, `cd.run_overlap_diagnostics()`
 2. **IPTW + GEE** — `causal_model.analyze_treatment_effect()` (propensity scoring → weight estimation → balance check → covariate-adjusted GEE)
 3. **Summary** — `CausalInferenceModel.build_summary_table(results_dict)` applies FDR correction
@@ -87,10 +87,10 @@ Configurable thresholds for SMD and AUC severity are stored in `self.overlap_thr
 - Clustering variable: `team_id`
 - Covariates split into three lists:
   - `categorical_vars`: `organization`, `job_level`, `performance_rating`
-  - `binary_vars`: `gender`, `is_people_manager`, `is_new_manager`
+  - `binary_vars`: often empty `[]` for the tutorial dataset; otherwise e.g. `gender` if modeled as binary
   - `continuous_vars`: `age`, `tenure_months`, `num_direct_reports`, `tot_span_of_control`
 - Baseline (prior-year) variables prefixed with `baseline_` — included in the GEE outcome model for covariate adjustment but **excluded** from propensity score model
-- Survey outcome variables: `manager_efficacy_index`, `workload_index_mgr`, `turnover_intention_index_mgr`
+- Survey outcome variables: `manager_efficacy_index`, `workload_index_mgr`, `stay_intention_index_mgr`
 - Retention is analyzed via survival analysis using `exit_date` → `days_observed` + `departed` (not the binary `retention_Xmonth` flags)
 - `outcome_descriptions` dict maps variable names to display-friendly labels
 - `outcome_valence` dict marks higher-is-worse outcomes (e.g., `workload_index_mgr: 'negative'`)
@@ -132,12 +132,12 @@ Both ATE and ATT are supported across both analysis approaches:
 
 ## Data Generation
 
-`s2_generate_data.py` is a **single long script** (not importable). Key design decisions:
+`data/generate_data.py` is a **single long script** (not importable). Key design decisions:
 - Self-selection into treatment driven by `organization` and `performance_rating` (logistic model, bisection-calibrated)
 - Below/Far Below performers are hard-blocked from treatment
-- ~25% of managers are "new" (no prior manager-level baselines → `0` in `baseline_manager_efficacy`)
-- Heterogeneous treatment effects: R&D gets extra effect on efficacy; new managers get extra effect on turnover intention
-- Outputs: `data/s2_manager_data.csv`, `data/s2_data_descriptives.xlsx`
+- Prior-year baselines (`baseline_manager_efficacy`, `baseline_workload`, `baseline_stay_intention`) are full-population Likert draws (no special “new manager” zeros)
+- Heterogeneous treatment effects: **Digital** orgs get an extra efficacy effect; managers with **tenure at or below** the sample median get an additional efficacy boost; stay intention has a uniform ATE
+- Outputs: `data/manager_data.csv`, `data/data_descriptives.xlsx`
 
 ## Development Notes
 
@@ -151,7 +151,7 @@ Both ATE and ATT are supported across both analysis approaches:
 - `compute_evalues_from_results()` defaults to `effect_type="auto"` — it auto-detects `cohens_d` vs `risk_ratio` from the result dict
 
 ### Excel export conventions
-Both `s2_generate_data.py` and `CausalInferenceModel.analyze_treatment_effect()` produce formatted `.xlsx` files via `openpyxl`. The data generator defines reusable formatting helpers that any new Excel export should follow:
+Both `data/generate_data.py` and `CausalInferenceModel.analyze_treatment_effect()` produce formatted `.xlsx` files via `openpyxl`. The data generator defines reusable formatting helpers that any new Excel export should follow:
 
 - **`apply_header_format(ws, row, max_col)`** — dark-blue header row with white bold text
 - **`apply_alternating_rows(ws, start_row, end_row, max_col)`** — striped rows; auto-bolds rows containing "Overall"/"Total"
@@ -160,7 +160,7 @@ Both `s2_generate_data.py` and `CausalInferenceModel.analyze_treatment_effect()`
 - **`auto_fit_columns(ws)`** — auto-sizes column widths
 - **`write_title(ws, row, title_text, max_col)`** — merged title cell with navy bold font
 
-These helpers are defined inline in `s2_generate_data.py` (not importable). When adding new Excel sheets, copy the pattern: `write_title` → `write_df` → `apply_pvalue_conditional` on p-value columns → `auto_fit_columns`. Formatting constants (`HEADER_FILL`, `ALT_ROW_FILL`, `GREEN_FILL`, etc.) are at the top of the Excel section (~line 780).
+These helpers are defined inline in `data/generate_data.py` (not importable). When adding new Excel sheets, copy the pattern: `write_title` → `write_df` → `apply_pvalue_conditional` on p-value columns → `auto_fit_columns`. Formatting constants (`HEADER_FILL`, `ALT_ROW_FILL`, `GREEN_FILL`, etc.) are at the top of the Excel section in that script.
 
 ### DML-specific conventions
 - `dml_estimate_treatment_effects()` accepts the same triple-list covariate convention (`categorical_vars`, `binary_vars`, `continuous_vars`) or explicit `W_cols`/`X_cols` lists.
@@ -184,7 +184,7 @@ These helpers are defined inline in `s2_generate_data.py` (not importable). When
 
 The descriptive exploration cell (cell 8) includes:
 - Demographic comparisons (continuous KDEs, categorical bar charts)
-- Team size / new manager status plots
+- Team size plots
 - **Retention over time line plot** — daily retention % by treatment group (Control vs. Treated) computed from `exit_date`
 
 The notebook ends with three substantial markdown cells:
@@ -196,6 +196,6 @@ The notebook ends with three substantial markdown cells:
 
 | Task | Command |
 |---|---|
-| Regenerate data | `python s2_generate_data.py` |
+| Regenerate data | `python data/generate_data.py` |
 | Install deps | `pip install -r requirements.txt` |
-| Run workshop | Open `scenario2_workshop.ipynb` and execute cells sequentially |
+| Run workshop | Open `causal_inference_workshop.ipynb` and execute cells sequentially |
