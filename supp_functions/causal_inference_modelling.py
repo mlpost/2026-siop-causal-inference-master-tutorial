@@ -1211,6 +1211,37 @@ class CausalInferenceModel:
                 _print(f"⚠️  PH test could not be completed: {e}")
                 ph_assumption_met = None
 
+            # Scaled Schoenfeld residuals + LOWESS trend (rank-transformed only)
+            try:
+                from lifelines.utils.lowess import lowess as ll_lowess
+                from scipy.stats import rankdata
+
+                resids = cph.compute_residuals(cox_data, kind="scaled_schoenfeld")
+                t_rank = rankdata(resids.index, method="average")
+                y = resids[treatment_var].values
+
+                fig_sr, ax_sr = plt.subplots(figsize=(8, 4))
+                ax_sr.scatter(t_rank, y, alpha=0.15, s=8, color="grey",
+                              label="Scaled Schoenfeld residuals")
+                # Bootstrap LOWESS bands (same approach as lifelines)
+                n = len(t_rank)
+                for _ in range(10):
+                    ix = sorted(np.random.choice(n, n))
+                    ax_sr.plot(t_rank[ix], ll_lowess(t_rank[ix], y[ix]),
+                               color="k", alpha=0.25, linewidth=1)
+                ax_sr.axhline(0, color="red", linestyle="--", linewidth=0.8)
+                ax_sr.set_xlabel("Rank(time)", fontsize=10)
+                ax_sr.set_ylabel("Scaled Schoenfeld residual", fontsize=10)
+                ax_sr.set_title(
+                    f"PH Diagnostic — '{treatment_var}' (rank transform)",
+                    fontsize=11, fontweight="bold",
+                )
+                ax_sr.grid(alpha=0.3)
+                plt.tight_layout()
+                plt.show()
+            except Exception as e:
+                _print(f"  (Schoenfeld residual plot could not be generated: {e})")
+
         # ------------------------------------------------------------------
         # Extract hazard ratios
         # ------------------------------------------------------------------
@@ -2008,18 +2039,24 @@ class CausalInferenceModel:
                     break
 
         # --- Track balance variables ---
+        # Exclude any variable that contains the treatment variable name
+        # (e.g., interaction terms like treatment_x_span) — these are
+        # functions of treatment and cannot be meaningfully balanced.
+        def _is_treatment_derived(var_name: str) -> bool:
+            return treatment_var in var_name and var_name != treatment_var
+
         balance_var_names = (
-            [v for v in continuous_vars       if v in df.columns]
-            + [v for v in binary_vars         if v in df.columns]
-            + [dc for dc in dummy_columns     if dc in df.columns]
-            + [v for v in baseline_vars_clean if v in df.columns]
+            [v for v in continuous_vars       if v in df.columns and not _is_treatment_derived(v)]
+            + [v for v in binary_vars         if v in df.columns and not _is_treatment_derived(v)]
+            + [dc for dc in dummy_columns     if dc in df.columns and not _is_treatment_derived(dc)]
+            + [v for v in baseline_vars_clean if v in df.columns and not _is_treatment_derived(v)]
         )
         balance_var_types: Dict[str, str] = {
-            v: "continuous" for v in continuous_vars if v in df.columns
+            v: "continuous" for v in continuous_vars if v in df.columns and not _is_treatment_derived(v)
         }
-        balance_var_types.update({v:  "binary"     for v  in binary_vars         if v  in df.columns})
-        balance_var_types.update({dc: "categorical" for dc in dummy_columns       if dc in df.columns})
-        balance_var_types.update({v:  "continuous"  for v  in baseline_vars_clean if v  in df.columns})
+        balance_var_types.update({v:  "binary"     for v  in binary_vars         if v  in df.columns and not _is_treatment_derived(v)})
+        balance_var_types.update({dc: "categorical" for dc in dummy_columns       if dc in df.columns and not _is_treatment_derived(dc)})
+        balance_var_types.update({v:  "continuous"  for v  in baseline_vars_clean if v  in df.columns and not _is_treatment_derived(v)})
 
         # --- Build covariate lists ---
         # Exclude non-covariate columns and strata backup columns
@@ -2029,8 +2066,10 @@ class CausalInferenceModel:
 
         covariates = [c for c in df.columns if c not in _exclude]
 
-        # PS covariates: all covariates including baseline (treated as confounder)
-        ps_covariates = list(covariates)
+        # PS covariates: exclude treatment-derived variables (interactions)
+        # from the propensity score model — they are functions of treatment
+        # and must not predict treatment assignment.
+        ps_covariates = [c for c in covariates if not _is_treatment_derived(c)]
 
         # --- Validate covariates ---
         if len(covariates) == 0:
@@ -2488,9 +2527,9 @@ class CausalInferenceModel:
             'Alpha': alpha
         })
         
-        # --- Build coefficients DataFrame (treatment row only, for printed summary) ---
+        # --- Build coefficients DataFrame (treatment-related rows, for printed summary) ---
         coefficients_df = full_coefficients_df[
-            full_coefficients_df['Parameter'] == treatment_var
+            full_coefficients_df['Parameter'].str.contains(treatment_var, na=False)
         ].copy()
         
         # --- Print summary ---
