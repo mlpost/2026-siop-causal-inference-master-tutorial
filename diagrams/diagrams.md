@@ -10,7 +10,7 @@ timeline
     section Checkpoint 3
         Survey Modeling : Weighting & Stabilization : Estimate Treatment Effect : Confirm Balance : Sensitivity Analysis
     section Checkpoint 4
-        Retention Modeling :  Kaplan-Meier Curves : Cox Time Interactions : RMST
+        Retention Modeling :  Weighted Kaplan-Meier Curve : RMST : Hazard Ratios with Cox Model
     section Checkpoint 5
         Final Recommendations : Summarize Findings & Limitations : Actionable Recommendations for L&D Team
     section Bonus
