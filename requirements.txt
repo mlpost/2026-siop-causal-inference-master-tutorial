@@ -16,3 +16,6 @@ seaborn>=0.13.2
 
 # Excel export
 openpyxl>=3.1.5
+
+# Notebook export (handouts: `python -m nbconvert --to html --no-input ...`)
+nbconvert>=7.16.0

@@ -28,8 +28,8 @@ Synthetic data generation → Pre-modeling diagnostics → IPTW + covariate-adju
 ├── REPO_ONBOARDING.md                # ← You are here
 │
 ├── supp_functions/
-│   ├── causal_diagnostics.py         # CausalDiagnostics class (~2,092 lines)
-│   └── causal_inference_modelling.py # CausalInferenceModel class (~4,102 lines)
+│   ├── causal_diagnostics.py         # CausalDiagnostics class (~2,500 lines)
+│   └── causal_inference_modelling.py # CausalInferenceModel class (~5,100 lines)
 │
 ├── data/
 │   ├── generate_data.py              # Deterministic synthetic data generator (seed=42)
@@ -52,10 +52,10 @@ Synthetic data generation → Pre-modeling diagnostics → IPTW + covariate-adju
 
 | File | Lines | Role |
 |------|-------|------|
-| `data/generate_data.py` | ~1,100 | Data generation + Excel reporting |
-| `causal_diagnostics.py` | ~2,092 | All pre-modeling & balance diagnostics |
-| `causal_inference_modelling.py` | ~4,102 | IPTW/GEE, Cox PH survival, DML, summary tables, sensitivity, reports |
-| `causal_inference_workshop.ipynb` | 45 cells | Interactive walkthrough of the full pipeline |
+| `data/generate_data.py` | ~1,080 | Data generation + Excel reporting |
+| `causal_diagnostics.py` | ~2,500 | All pre-modeling & balance diagnostics |
+| `causal_inference_modelling.py` | ~5,100 | IPTW/GEE, Cox PH survival (with time interactions), RMST with bootstrap CI, DML (PLR + Causal Forest), E-values, summary tables |
+| `causal_inference_workshop.ipynb` | 83 cells (44 code + 39 markdown) | Interactive walkthrough of the full pipeline |
 
 ---
 
@@ -96,6 +96,7 @@ See the public [README.md](README.md) for Colab clone + setup instructions.
 | `matplotlib` / `seaborn` | ≥3.9.0 / ≥0.13.2 | Plotting |
 | `lifelines` | ≥0.27.0 | Survival analysis (Cox PH, Kaplan-Meier) |
 | `openpyxl` | ≥3.1.5 | Excel export with formatting |
+| `nbconvert` | ≥7.16.0 | Export the notebook to `causal_inference_workshop_no_code.html` for workshop handouts (`python -m nbconvert --to html --no-input ...`) |
 
 ---
 
@@ -143,20 +144,20 @@ Three complementary analysis approaches + reporting utilities:
 
 | Method | Purpose |
 |--------|---------|
-| **`analyze_treatment_effect()`** | Full IPTW + covariate-adjusted GEE pipeline for survey outcomes |
-| **`analyze_survival_effect()`** | Full IPTW + Cox PH pipeline with time interaction for time-to-event outcomes |
-| **`dml_cluster_robust_ate()`** | DoubleML PLR with cluster-aware cross-fitting and cluster-robust inference |
-| **`dml_estimate_treatment_effects()`** | Double Machine Learning via `econml` for CATE exploration |
+| **`analyze_treatment_effect()`** | Full IPTW + covariate-adjusted GEE pipeline for survey outcomes (ATE or ATT) |
+| **`analyze_survival_effect()`** | End-to-end IPTW + Cox PH pipeline with time interaction for time-to-event outcomes (internal orchestrator; the notebook now drives the retention pipeline step-by-step via the building blocks below for teaching clarity) |
+| **`dml_cluster_robust_ate()`** | DoubleML PLR with cluster-aware cross-fitting and cluster-robust inference (`doubleml`) — ATE robustness check |
+| **`dml_estimate_treatment_effects()`** | Causal Forest DML via `econml` for CATE / heterogeneity exploration |
 | **`prepare_survival_data()`** | Convert departure dates → `days_observed` + `departed` + `departure_quarter` |
-| **`plot_survival_curves()`** | IPTW-weighted Kaplan-Meier curves with risk table + HR annotation |
+| **`_fit_weighted_km_curves()`** | IPTW-weighted Kaplan–Meier survival curves (descriptive / exploratory visualization of the retention gap) |
+| **`compute_rmst_difference()`** | Restricted Mean Survival Time difference with **bootstrap CI** — the **primary causal estimand** for retention |
+| **`_fit_cox_model()`** | Cox PH fitter used for both the overall HR (+ Schoenfeld PH test) and the period-specific HRs via `time_interaction='categorical'` (inferential model when PH is violated) |
+| **`plot_survival_curves()`** | IPTW-weighted KM curves with risk table + HR annotation (plotting wrapper) |
 | **`build_summary_table()`** | Consolidates GEE results across outcomes with FDR correction |
 | **`build_survival_summary_table()`** | Consolidates survival results (HR, snapshots, optional RMST) |
-| **`compute_evalues_from_results()`** | E-value sensitivity analysis (auto-detects Cohen's d vs risk ratio) |
+| **`compute_evalue()`** | Single-effect E-value (auto-detects Cohen's d vs risk ratio) |
+| **`compute_evalues_from_results()`** | E-value sensitivity analysis across a dict of results |
 | **`compute_confounder_evalue_benchmarks()`** | Calibrates E-values against strongest measured confounders (SMD → RR → E-value) |
-| **`compute_rmst_difference()`** | Restricted mean survival time difference with bootstrap CI |
-| **`generate_gee_summary_report()`** | Markdown narrative report for survey (GEE) outcomes |
-| **`generate_survival_summary_report()`** | Markdown narrative report for survival outcomes (HR, RMST, KM) |
-| **`generate_comparison_table()`** | ATE vs ATT side-by-side Markdown comparison |
 
 **Shared IPTW infrastructure:** Both `analyze_treatment_effect()` and `analyze_survival_effect()` delegate data prep, one-hot encoding, column sanitization, propensity score estimation, weight diagnostics, overlap/weight plotting, and balance checking to a shared private method `_prepare_iptw_data()` (~300 lines).
 
@@ -170,11 +171,16 @@ Three complementary analysis approaches + reporting utilities:
 7. Effect size metrics (Cohen's d, % change)
 8. Optional Excel export
 
-**Internal pipeline of `analyze_survival_effect()`:**
-1. Steps 1–5 identical to above (shared via `_prepare_iptw_data()`)
-2. Cox PH with time interaction via `_fit_cox_model()`: `time_interaction="categorical"` expands data to person-period format and fits separate HRs per interval (e.g., quarterly); `time_interaction="continuous"` models treatment × time as a linear trend
-3. Full-period KM still computed for survival curve plots
-4. Returns per-interval HRs, survival snapshots, and balance diagnostics
+**Retention pipeline (driven step-by-step from the notebook for pedagogical transparency):**
+1. `prepare_survival_data()` → build `days_observed` + `departed` event indicator from `exit_date`
+2. IPTW weights come from the **same propensity-score pipeline** used for the survey analysis (shared `_prepare_iptw_data()` / `estimate_propensity_weights()`) — retention does not re-estimate the PS
+3. `_fit_weighted_km_curves()` → IPTW-weighted KM curves for **descriptive visualization** of the retention gap (snapshot differences at 3/6/9/12 months; no formal CIs attached to the snapshots)
+4. `compute_rmst_difference()` → **primary causal estimand** — IPTW-weighted RMST difference with **bootstrap CI** (n=500). This is the stakeholder-friendly headline.
+5. `_fit_cox_model()` (standard) → overall HR + **Schoenfeld PH test** to check for non-proportional hazards
+6. `_fit_cox_model(time_interaction="categorical", period_breaks=[0,90,180,270,365])` → **inferential model**: period-specific HRs (0–3 / 3–6 / 6–9 / 9–12 months) that recover the strongly time-varying treatment effect built into the DGP
+7. `compute_evalue()` on the overall HR + balance check via `compute_balance_df()`
+
+**Why the notebook unpacks the orchestrator:** `analyze_survival_effect()` can run the whole survival pipeline in one call, but Checkpoint 4 in the notebook decomposes it into the five steps above so learners can see the KM / RMST / Cox distinction explicitly — KM is descriptive, RMST is the primary causal estimand, Cox is the inferential model.
 
 ---
 
@@ -192,12 +198,14 @@ Generated by `data/generate_data.py` with `seed=42`. Key design decisions:
 
 ### Built-In Treatment Effects (Ground Truth)
 
-| Outcome | True Effect | Notes |
-|---------|-------------|-------|
-| `manager_efficacy_index` | d = 0.20 | Digital +0.15 d; tenure ≤ median +0.10 d (stronger when tenure is lower) |
-| `workload_index_mgr` | d = 0.2 | — |
-| `stay_intention_index_mgr` | d = 0.15 | Higher score = more intention to stay |
-| Retention (3/6/9/12 mo) | See `generate_data.py` | **DGP only** — timing encoded via `exit_date`; binary flags not in `manager_data.csv` |
+See [`data/ground_truth.md`](data/ground_truth.md) for the full specification — this table is a summary.
+
+| Outcome | Base True Effect | Heterogeneity (continuous gradients) |
+|---------|------------------|--------------------------------------|
+| `manager_efficacy_index` | **d = 0.33** | **Top HTE — `num_direct_reports`**: +0.15 × `nd_reports_scaled` extra *d* (larger teams → larger effect). **Second HTE — low tenure**: +0.05 × `low_tenure_scaled` extra *d* (newer managers → slightly larger effect). HTE gradients apply **only** to this outcome. |
+| `workload_index_mgr` | **d = 0** | No treatment term — outcome is baseline + noise ("no harm" finding by design) |
+| `stay_intention_index_mgr` | **d = 0.10** | Homogeneous (no HTE). Higher score = more intention to stay |
+| Retention (3/6/9/12 mo) | See §7 of [`ground_truth.md`](data/ground_truth.md) | **Deliberately non-proportional**: strong 0–3 mo effect (target HR ≈ 0.27), attenuated 3–6 mo (target HR ≈ 0.64), null after 6 mo. Encoded via `exit_date`; intermediate binary retention flags are NOT in `manager_data.csv`. |
 
 ### Variable Glossary
 
@@ -238,17 +246,18 @@ continuous_vars = ['age', 'tenure_months', 'num_direct_reports', 'tot_span_of_co
 
 ## 6. Notebook Walkthrough (causal_inference_workshop.ipynb)
 
-The notebook has **45 cells** (27 code + 18 markdown) organized into a five-checkpoint learning flow:
+The notebook has **83 cells** (44 code + 39 markdown) organized into a five-checkpoint learning flow, plus a "Bonus: Further Learning" section. Several code cells render HTML slideshows with `from IPython.display import HTML; HTML(r"""…""")` — these visual aids are a hard exclusion when refreshing interpretation markdown (see the `update-markdown-interpretations` skill).
 
 | Checkpoint | What Happens |
 |------------|--------------|
 | **Checkpoint 1: Context & Overview** | Case study, timeline, data & outcomes, causal DAG, Colab setup, imports, class instantiation, load `manager_data.csv` |
-| **Checkpoint 2: Diagnostics & Causal Identification** | Overlap diagnostics, VIF, intercorrelations, estimand feasibility assessment |
-| **Checkpoint 3: Modeling** | IPTW + GEE (ATE/ATT) for survey outcomes, survival setup, Cox PH with time interaction, balance verification, E-values, summary reports, `generate_comparison_table()` |
-| **Checkpoint 4: Key Takeaways for Stakeholders** | Technical summary, actionable recommendations for L&D team |
-| **Checkpoint 5: Further Learning** | DoubleML ATE robustness check plus econml Causal Forest HTE exploration on `manager_efficacy_index` |
+| **Checkpoint 2: Diagnostics & Causal Identification** | VIF / intercorrelations, overlap diagnostics, positivity violation (low performers hard-excluded from treated), estimand feasibility assessment |
+| **Checkpoint 3: Survey Modeling** | IPTW + covariate-adjusted GEE for the three survey outcomes (manager efficacy, workload, stay intention); FDR-corrected summary table; **E-value sensitivity + confounder-benchmark calibration** |
+| **Checkpoint 4: Retention Modeling** | Step-by-step IPTW-weighted survival analysis: KM curves (descriptive), **RMST difference with bootstrap CI (primary causal estimand)**, Cox PH + Schoenfeld PH test, **period-specific Cox HRs via time interaction** (inferential) + E-values |
+| **Checkpoint 5: Key Takeaways for Stakeholders** | Technical-to-stakeholder translation; required bold-red "human review" notice in the What-We-Found cell; What-This-Means / Recommendations / Bottom Line sections |
+| **Bonus: Further Learning** | (1) Cluster-robust DoubleML PLR as an alternative ATE identification strategy for manager efficacy; (2) **Causal Forest (econml) HTE** on manager efficacy restricted to actionable effect modifiers — recovers `num_direct_reports` and `tenure_months` as the top moderators built into the DGP |
 
-Data is loaded from `data/manager_data.csv`. The notebook drops `propensity_score` if present (generated by older data scripts).
+Data is loaded from `data/manager_data.csv`. The notebook drops `propensity_score` if present (leaked from data generation).
 
 ### Typical Analysis Pattern (Per Outcome Family)
 
@@ -271,34 +280,53 @@ evalues = CausalInferenceModel.compute_evalues_from_results(results)
 
 # 4. Confounder E-value benchmarks (calibration)
 benchmarks = CausalInferenceModel.compute_confounder_evalue_benchmarks(results, evalue_df=evalues)
-
-# 5. Generate markdown report
-report = CausalInferenceModel.generate_gee_summary_report(summary, evalues, results, ...)
 ```
 
-**Survival Analysis Pattern:**
+**Retention / Survival Pattern (step-by-step, as taught in Checkpoint 4):**
 
 ```python
 # 1. Prepare survival data
-data = causal_model.prepare_survival_data(data, 'exit_date', 'treatment', ...)
-
-# 2. Cox PH with time interaction
-survival_results = {}
-survival_results['retention'] = causal_model.analyze_survival_effect(
-    data=data, time_var='days_observed', event_var='departed',
-    treatment_var='treatment',
-    time_interaction='categorical',
-    period_breaks=[0, 90, 180, 270, 365],
-    period_labels=['0-3mo', '3-6mo', '6-9mo', '9-12mo'], ...
+data = causal_model.prepare_survival_data(
+    data, departure_date_col='exit_date', treatment_col='treatment',
+    date_format='mixed',
 )
 
-# 3. KM curves + survival summary + E-values
-fig = causal_model.plot_survival_curves(survival_results['retention'], ...)
-summary = CausalInferenceModel.build_survival_summary_table(survival_results)
-evalues = CausalInferenceModel.compute_evalues_from_results(survival_results, effect_type="risk_ratio")
-benchmarks = CausalInferenceModel.compute_confounder_evalue_benchmarks(survival_results, evalue_df=evalues)
-report = CausalInferenceModel.generate_survival_summary_report(summary, evalues, survival_results, survival_plot_fig=fig)
+# 2. IPTW-weighted KM curves — descriptive / exploratory visualization
+km_results = causal_model._fit_weighted_km_curves(
+    data=data, treatment_col='treatment',
+    time_col='days_observed', event_col='departed', weights=iptw_weights,
+)
+
+# 3. RMST difference with bootstrap CI — PRIMARY causal estimand
+rmst_result = CausalInferenceModel.compute_rmst_difference(
+    data=data, time_col='days_observed', event_col='departed',
+    treatment_col='treatment', weights=iptw_weights,
+    tau=365, n_bootstrap=500,
+)
+
+# 4. Standard Cox PH — overall HR + Schoenfeld PH test
+cox_standard = causal_model._fit_cox_model(
+    data=data, time_col='days_observed', event_col='departed',
+    treatment_col='treatment', weights=iptw_weights,
+)
+
+# 5. Time-interaction Cox — inferential period-specific HRs (PH violated)
+cox_time_interaction = causal_model._fit_cox_model(
+    data=data, time_col='days_observed', event_col='departed',
+    treatment_col='treatment', weights=iptw_weights,
+    time_interaction='categorical',
+    period_breaks=[0, 90, 180, 270, 365],
+    period_labels=['0-3mo', '3-6mo', '6-9mo', '9-12mo'],
+)
+
+# 6. Overall-HR E-value for sensitivity analysis
+evalue_result = CausalInferenceModel.compute_evalue(
+    effect=cox_standard['hr'], ci_lower=cox_standard['hr_ci_lower'],
+    ci_upper=cox_standard['hr_ci_upper'], effect_type='risk_ratio',
+)
 ```
+
+The `analyze_survival_effect()` method wraps steps 2–5 into a single call and is still available; the notebook unpacks it so learners see each estimand separately. The retention technical summary in Cell 63 explicitly labels KM as descriptive, RMST as the primary causal estimand, and the time-interaction Cox as the inferential model.
 
 ## 7. Common Gotchas
 
@@ -313,7 +341,11 @@ report = CausalInferenceModel.generate_survival_summary_report(summary, evalues,
 | New manager baseline = 0 | `baseline_manager_efficacy` is 0 (not NaN) for new managers. This is intentional — it represents "no prior manager-level data." |
 | Survival analysis date format | `exit_date` uses M/D/YYYY without zero-padding. Pass `date_format='mixed'` to `prepare_survival_data()`. |
 | No ATT for retention | The notebook only runs ATE for survival outcomes. ATT is supported but not demonstrated for retention. |
-| KM confidence bands | IPTW-weighted KM confidence bands are **not valid** for inference (Greenwood variance ignores PS uncertainty). Use Cox HRs for statistical testing. |
+| KM is descriptive, not inferential | IPTW-weighted KM curves are used in Checkpoint 4 purely for **visualization** of the retention gap; Greenwood-style confidence bands ignore PS uncertainty and are not valid for inference. The **primary causal estimand** for retention is the **RMST difference (with bootstrap CI)**; period-specific **Cox HRs** are the inferential model. |
+| PH assumption is violated by design | The DGP deliberately builds in a front-loaded treatment effect (strong 0–3 mo → null after 6 mo). The Schoenfeld test rejects PH (p ≈ 0.0006 at seed 42), so the **single overall Cox HR** (≈0.65) is a time-averaged quantity and should **not** be the stakeholder headline — use RMST + period-specific HRs. |
+| HTE effect modifiers are intentionally restricted | The Causal Forest is fit with the full covariate set as confounding controls `W`, but the **effect-modifier set `X` is restricted** to actionable variables (`organization`, `performance_rating`, `region`, `age`, `tenure_months`, `num_direct_reports`, `tot_span_of_control`). `gender` and `job_family` are intentionally excluded to avoid surfacing fairness-sensitive or high-cardinality noisy moderators. The forest correctly recovers `num_direct_reports` and `tenure_months` as the top moderators — matching the DGP. |
+| HTE applies only to manager efficacy | By design, the DGP adds heterogeneous treatment effects **only** to `manager_efficacy_index`. `workload_index_mgr` and `stay_intention_index_mgr` are homogeneous. Running the Causal Forest on those outcomes would not produce meaningful moderator signal. |
+| Report-generation helpers removed | Older snapshots of this repo exposed `generate_gee_summary_report()`, `generate_survival_summary_report()`, and `generate_comparison_table()` on `CausalInferenceModel`. Those methods have been **removed**; the notebook writes technical summaries manually in markdown cells (see Cells 42 and 63). |
 
 ---
 
@@ -349,10 +381,14 @@ The script is deterministic (seed=42). Output should be identical across runs on
 | **Positivity** | Assumption that all covariate strata have non-zero probability of treatment |
 | **Cox PH** | Cox Proportional Hazards — semi-parametric survival model: $h(t) = h_0(t) \exp(\beta X)$ |
 | **HR** | Hazard Ratio — the ratio of departure rates; HR < 1 means treatment is protective |
-| **KM** | Kaplan-Meier — non-parametric survival estimator showing retention probability over time |
-| **RMST** | Restricted Mean Survival Time — area under survival curve up to a time horizon (available but unused in notebook) |
+| **PH assumption** | Proportional Hazards assumption — the HR is **constant over time**. When violated (as in this workshop), a single overall HR time-averages a changing effect and can mislead; remedy is a time-interaction Cox (period-specific HRs) or switch to RMST |
+| **Schoenfeld residuals / Grambsch–Therneau test** | Statistical test for the PH assumption; a small p-value indicates PH is violated |
+| **KM** | Kaplan–Meier — non-parametric survival estimator; in this workshop it is used **descriptively** (not as a formal causal estimand) to visualize the retention gap |
+| **RMST** | Restricted Mean Survival Time — expected survival time up to a horizon τ (area under the survival curve from 0 to τ). In this workshop, the **IPTW-weighted RMST difference with a bootstrap CI** is the **primary causal estimand for retention**: the average additional days retained per trained manager within the study window |
+| **DML / PLR** | Double Machine Learning / Partially Linear Regression — an alternative ATE identification strategy that residualizes the outcome and treatment against ML nuisance models before estimating the treatment coefficient. The workshop uses `doubleml.DoubleMLPLR` with cluster-aware cross-fitting for a like-for-like comparison against IPTW+GEE |
+| **Causal Forest** | `econml.CausalForestDML` — ML estimator for individualized CATEs using the DML framework. Fit with the full covariate set as controls `W` but a restricted **actionable** set as effect modifiers `X` to surface interpretable heterogeneity |
 | **Confounder E-value benchmark** | E-value computed from the pre-weighting SMD of a measured covariate, used to calibrate treatment E-values — answers "how much stronger would an unmeasured confounder need to be vs. our strongest measured one?" |
 
 ---
 
-*Last updated: 2026-03-19*
+*Last updated: 2026-04-23*

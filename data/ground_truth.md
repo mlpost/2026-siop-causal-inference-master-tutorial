@@ -112,16 +112,21 @@ Linear predictor: `**intercept` + `org_weight` + `perf_weight`**, with `p_treat 
 
 ## 6. Continuous outcomes (true DGP parameters)
 
-Implemented in `generate_outcome_with_baseline` ([lines 172–216](generate_data.py)). Treatment adds `**treatment_effect_d * base_sd`** on the latent scale; optional **heterogeneous** add-ons `**hetero_extra_d * base_sd * treatment * hetero_mask`** and, for `manager_efficacy_index` only, a second term `**hetero_extra_d_2 * base_sd * treatment * hetero_mask_2`**. Outcomes are clipped to **[1, 5]** and rounded to one decimal ([lines 214–216](generate_data.py)).
+Implemented in `generate_outcome_with_baseline` ([lines 172–216](generate_data.py)). Treatment adds `**treatment_effect_d * base_sd`** on the latent scale; optional **heterogeneous** add-ons `**hetero_extra_d * base_sd * treatment * hetero_mask`** and, for `manager_efficacy_index` only, a second term `**hetero_extra_d_2 * base_sd * treatment * hetero_mask_2`**. `hetero_mask` and `hetero_mask_2` may be binary 0/1 vectors *or* continuous values in [0, 1]. Outcomes are clipped to **[1, 5]** and rounded to one decimal ([lines 214–216](generate_data.py)).
 
-For `**manager_efficacy_index`**, the second interaction encodes **stronger treatment efficacy when tenure is lower**: `hetero_mask_2` is **1** when `tenure_months` is **at or below the sample median** (median computed on the full simulated sample at generation time; with `N_TOTAL = 9000` this split is approximately half / half). The incremental effect is **+0.10** Cohen’s *d* on the latent scale (in addition to the base effect and the Digital add-on).
+For `**manager_efficacy_index`** only, two **continuous** HTE gradients are layered on top of the base effect:
+
+- **Top HTE — `num_direct_reports`:** a linear gradient via `nd_reports_scaled = (num_direct_reports - 5) / 7` (ranges 0 at 5 reports → 1 at 12 reports, mean ≈ 0.50). The incremental Cohen’s *d* is **+0.15 × `nd_reports_scaled`** on the latent scale, so a manager with 12 direct reports gets a +0.15 *d* bonus on top of the base 0.33 *d*, while a manager with 5 direct reports gets no bonus. This is the strongest moderator by design.
+- **Second HTE — low tenure:** a linear gradient via `low_tenure_scaled = clip(1 - tenure_months / 60, 0, 1)` (ranges 1 at 0 months → 0 at 60+ months, mean ≈ 0.80 because tenure is right-skewed). The incremental Cohen’s *d* is **+0.05 × `low_tenure_scaled`**, so a brand-new manager gets +0.05 *d* on top of the base and the direct-reports gradient, while a manager with 60+ months of tenure gets no tenure bonus.
+
+Both gradients apply **only** to `manager_efficacy_index`. `workload_index_mgr` and `stay_intention_index_mgr` have **no HTE** (homogeneous effects by design).
 
 
-| Column                         | `base_mean` | `base_sd` | Cohen’s `d` | `baseline_r` | Baseline vector                 | Heterogeneity                                                                                  |
-| ------------------------------ | ----------- | --------- | ----------- | ------------ | ------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `manager_efficacy_index`       | 3.4         | 0.90      | **0.33**    | 0.60         | `baseline_manager_efficacy` | Digital: **+0.15** extra *d*; **lower tenure** (≤ median `tenure_months`): **+0.10** extra *d* |
-| `workload_index_mgr`           | 3.2         | 1.00      | **0**       | 0.45         | `baseline_workload`             | — (no direct treatment term; outcome = baseline + noise)                                     |
-| `stay_intention_index_mgr`     | 2.8         | 1.00      | **0.10**    | 0.50         | `baseline_stay_intention`       | —                                                                                              |
+| Column                         | `base_mean` | `base_sd` | Cohen’s `d` | `baseline_r` | Baseline vector                 | Heterogeneity                                                                                                                                   |
+| ------------------------------ | ----------- | --------- | ----------- | ------------ | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `manager_efficacy_index`       | 3.4         | 0.90      | **0.33**    | 0.60         | `baseline_manager_efficacy`     | **`num_direct_reports`** (top): **+0.15 × `nd_reports_scaled`** extra *d*; **low tenure** (second): **+0.05 × `low_tenure_scaled`** extra *d*   |
+| `workload_index_mgr`           | 3.2         | 1.00      | **0**       | 0.45         | `baseline_workload`             | — (no direct treatment term; outcome = baseline + noise)                                                                                        |
+| `stay_intention_index_mgr`     | 2.8         | 1.00      | **0.10**    | 0.50         | `baseline_stay_intention`       | —                                                                                                                                               |
 
 
 ([lines 219–253](generate_data.py))
@@ -141,32 +146,43 @@ Retention is a **deliberate two-stage** DGP, not a single joint model (e.g. prop
 
 **Why two stages:** Early retention stays **covariate-rich**; later intervals stay **simple** so `exit_date` quarter assignment and cumulative targets remain easy to read and to teach. This is an intentional **tutorial** simplification, not a claim of one fully specified continuous-time survival model.
 
-**Teaching note — non-proportional hazards:** The DGP does **not** impose a **constant hazard ratio** (or a constant treatment effect on the **discrete-time hazard**) across the four 3-month bands. The **treatment contrast may differ** between §7.1 and each §7.2 interval because the mechanisms differ—so materials may state that **proportional hazards is violated** in this mock data.
+**Teaching note — non-proportional hazards (front-loaded effect):** The DGP **deliberately violates** proportional hazards. The treatment effect on the discrete-time hazard is **strong** in the 0–3 month interval (§7.1), **attenuates** in the 3–6 month interval (§7.2), and is **null** from 6 months onward. The expected period-specific hazard-ratio pattern is roughly **HR ≈ 0.27** (0–3 mo, highly significant), **HR ≈ 0.64** (3–6 mo, borderline), and **HR ≈ 1.0** (6–9 and 9–12 mo, null). The log-hazard-ratio is monotonically increasing toward zero over time, which should be detectable by a **Schoenfeld residual / Grambsch–Therneau test** and recoverable by a **time-interaction Cox model**.
 
 ### 7.1 Three-month retention
 
-`generate_retention_with_baseline` ([lines 261–276](generate_data.py)); first-period draw ([lines 278–282](generate_data.py)):
+`generate_retention_with_baseline` ([lines 261–276](generate_data.py)); first-period draw ([lines 278–285](generate_data.py)):
 
-- **Baseline retention rate:** `base_rate = 0.90`.
-- **Treatment odds ratio:** `treatment_or = 2.0` (on log-odds scale).
+- **Baseline retention rate:** `base_rate = 0.88` (slightly lower than the legacy value so there are enough control-arm events to power period-specific tests).
+- **Treatment odds ratio:** `treatment_or = 4.0` (on log-odds scale) — a **large** early effect that dominates the 12-month cumulative gap.
 - **Baseline covariate:** centered `baseline_stay_intention`, coefficient **0.30** on the logit scale ([lines 271–272](generate_data.py)).
+
+Implied 3-month retention: treated ≈ **97%**, control ≈ **88%** (≈ 9 pp gap).
 
 
 ### 7.2 Six-, nine-, and twelve-month retention
 
-Second stage (fixed conditional probabilities); see §7.0.
+Second stage (fixed conditional probabilities); see §7.0. Designed to **attenuate then null out** the treatment effect.
 
-Conditional on surviving the previous period ([lines 286–303](generate_data.py)):
-
-
-| Horizon            | Treated conditional survival | Control conditional survival |
-| ------------------ | ---------------------------- | ---------------------------- |
-| 6 mo (given 3 mo)  | `0.93/0.95`                  | `0.86/0.90`                  |
-| 9 mo (given 6 mo)  | `0.91/0.93`                  | `0.83/0.86`                  |
-| 12 mo (given 9 mo) | `0.89/0.91`                  | `0.80/0.83`                  |
+Conditional on surviving the previous period ([lines 290–311](generate_data.py)):
 
 
-Comments in code tie these to **target cumulative** rates (~93/91/89% treated; ~86/83/80% control) ([lines 285–302](generate_data.py)).
+| Horizon            | Treated conditional survival | Control conditional survival | Period effect |
+| ------------------ | ---------------------------- | ---------------------------- | ------------- |
+| 6 mo (given 3 mo)  | `0.965`                      | `0.945`                      | borderline    |
+| 9 mo (given 6 mo)  | `0.955`                      | `0.955`                      | null          |
+| 12 mo (given 9 mo) | `0.955`                      | `0.955`                      | null          |
+
+
+Implied **target cumulative** retention:
+
+| Horizon | Treated | Control | Gap |
+| ------- | ------- | ------- | --- |
+|  3 mo   | ~97%    | ~88%    | ~9 pp |
+|  6 mo   | ~93%    | ~83%    | ~10 pp |
+|  9 mo   | ~89%    | ~79%    | ~10 pp |
+| 12 mo   | ~85%    | ~76%    | ~9 pp |
+
+The 12-month cumulative gap is **almost entirely inherited** from the 0–3 month stage — a clean example of why a single Cox hazard ratio can mask a strongly time-varying effect.
 
 ### 7.3 Monotonicity (structural)
 
@@ -207,10 +223,12 @@ The **nested 3 / 6 / 9 / 12-month** retention structure above is **not** written
 
 ## 10. Sanity checks (seed 42, approximate)
 
-The script prints **expected ballpark** standardized mean differences for verification ([lines 575–597](generate_data.py)). These are **not** definitions of the DGP; they are **diagnostic expectations** under the default seed:
+The script prints **expected ballpark** standardized mean differences for verification ([lines 585–610](generate_data.py)). These are **not** definitions of the DGP; they are **diagnostic expectations** under the default seed:
 
-- **Manager efficacy (treated vs control):** ~**0.45–0.55** among Digital; ~**0.30–0.45** among ≤ median tenure (overlap with Digital varies); ~**0.33+** overall (crude SMD).
-- **Stay intention (treated vs control):** ~**0.10**
+- **Manager efficacy (treated vs control, crude SMD):** ~**0.33–0.45** overall.
+- **Top HTE (direct reports):** subgroup *d* is **larger for managers with high spans** (`num_direct_reports ≥ 9`) than for low spans (`≤ 6`). The low-span subgroup should be close to the base 0.33 *d*.
+- **Second HTE (low tenure):** subgroup *d* is **slightly larger for tenure ≤ 6 months** than for tenure ≥ 24 months. The high-tenure subgroup should be close to the base 0.33 *d*.
+- **Stay intention (treated vs control):** ~**0.10**.
 
 Use these as loose QC bands when reproducing the pipeline with `SEED = 42`.
 
@@ -337,7 +355,7 @@ Quick reference for **treatment-related** parameters. Scale: survey outcomes use
 
 | Outcome | Main treatment effect (Cohen’s *d*) | Heterogeneity (extra *d* on latent scale, on top of main effect) | `baseline_r` | Teaching conclusion |
 | ------- | ----------------------------------- | ---------------------------------------------------------------- | ------------ | ------------------- |
-| `manager_efficacy_index` | **0.33** | **Digital:** +0.15; **tenure ≤ sample median:** +0.10 | 0.60 | Training has a **positive** impact on manager efficacy ratings, **especially** for **Digital** orgs and for managers with **tenure at or below** the sample median. Calibrated so IPTW marginal Cohen’s *d* supports **moderate** E-values (~2–3). |
+| `manager_efficacy_index` | **0.33** | **Top HTE — `num_direct_reports`:** +0.15 × `(num_direct_reports − 5) / 7` (peaks at +0.15 *d* for 12 reports, zero at 5 reports). **Second HTE — low tenure:** +0.05 × `clip(1 − tenure_months / 60, 0, 1)` (peaks at +0.05 *d* for brand-new managers, zero from 60 months onward). | 0.60 | Training has a **positive** impact on manager efficacy ratings, **especially** for managers with **more direct reports** (top moderator) and secondarily for **newer managers** (second moderator). Calibrated so IPTW marginal Cohen’s *d* supports **moderate** E-values (~2–3). |
 | `workload_index_mgr` | **0** | — | 0.45 | **No** direct treatment effect on workload (outcome driven by prior-year workload and noise); use for **null** / balance checks in IPTW + GEE. |
 | `stay_intention_index_mgr` | **0.10** | — | 0.50 | A **small** positive treatment association with stay intention; calibrated so marginal IPTW E-values land in the **weak** band (~1.5–2.0) while remaining detectable at large *N*. |
 
@@ -349,20 +367,20 @@ Quick reference for **treatment-related** parameters. Scale: survey outcomes use
 
 | Role | Value | Teaching conclusion |
 | ---- | ----- | ------------------- |
-| Baseline retention rate | **0.90** | At baseline, **most** managers are still employed through the first **3 months** (high retention before comparing groups). |
-| Treatment | **OR = 2.0** (log-odds scale) | Program participants have **substantially better odds** of surviving the first 3 months than non-participants (treatment helps early retention). |
+| Baseline retention rate | **0.88** | Most managers survive the first **3 months** at baseline, but the control-arm attrition rate is high enough (~12%) to give period-specific tests adequate power. |
+| Treatment | **OR = 4.0** (log-odds scale) | Program participants have **dramatically better odds** of surviving the first 3 months — this is where essentially all of the 12-month retention advantage is created. |
 | `baseline_stay_intention` (centered) | coefficient **0.30** | Managers with **higher prior stay intention** tend to have **better** early retention (covariate matters, not just treatment). |
 
 **Stage 2 — conditional on surviving the previous period** (§7.2; treated vs control)
 
 | Interval | Treated *P*(survive \| previous) | Control *P*(survive \| previous) | Teaching conclusion |
 | -------- | -------------------------------- | -------------------------------- | ------------------- |
-| 6 mo \| 3 mo | 0.93 / 0.95 | 0.86 / 0.90 | Among people still there at **3 months**, treated managers are **more likely** than controls to survive the **next** 3 months (treatment gap persists). |
-| 9 mo \| 6 mo | 0.91 / 0.93 | 0.83 / 0.86 | Same pattern in the **next** interval: treated survival stays **higher** than control, conditional on reaching **6 months**. |
-| 12 mo \| 9 mo | 0.89 / 0.91 | 0.80 / 0.83 | Through **12 months**, treated managers still show **higher** conditional survival than controls (gap does not disappear). |
+| 6 mo \| 3 mo | 0.965 | 0.945 | Residual treatment advantage **attenuates**; expect a **borderline-significant** 3–6 month effect. |
+| 9 mo \| 6 mo | 0.955 | 0.955 | **No** treatment effect on 6–9 month conditional survival (null by design). |
+| 12 mo \| 9 mo | 0.955 | 0.955 | **No** treatment effect on 9–12 month conditional survival (null by design). |
 
-Approximate **target cumulative** retention (from code comments): treated **~93% / 91% / 89%**; control **~86% / 83% / 80%** at 6 / 9 / 12 months.
+Approximate **target cumulative** retention (from code comments): treated **~93% / 89% / 85%**; control **~83% / 79% / 76%** at 6 / 9 / 12 months. The 12-month cumulative gap (~9 pp) is **carried forward from the 0–3 month stage** — later intervals neither widen nor close it.
 
-**Structural note:** Retention is a **two-stage** DGP; treatment contrasts need **not** be constant across intervals (§7.0 — non-proportional hazards).
+**Structural note:** Retention is a **two-stage** DGP with a **front-loaded** treatment effect. Proportional hazards is **violated by design** — period-specific hazard ratios move from ~0.27 (0–3 mo) through ~0.64 (3–6 mo) to ~1.0 (6–12 mo). A single Cox HR will average over these and **understate** the early effect while **overstating** the late effect (§7.0).
 
 

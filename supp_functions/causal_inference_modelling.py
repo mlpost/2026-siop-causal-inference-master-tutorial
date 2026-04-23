@@ -2664,7 +2664,11 @@ class CausalInferenceModel:
             takes precedence over the triple-list (categorical/binary/continuous).
         X_cols : list of str, optional
             Explicit list of effect-modifier column names for CATE estimation.
-            If ``None``, defaults to ``W_cols``.
+            May include **raw categorical variable names** (e.g. ``'organization'``)
+            that appear in ``categorical_vars``; these are auto-expanded to their
+            one-hot-encoded dummy columns. Binary / continuous names and already-
+            encoded dummy names pass through unchanged. If ``None``, defaults to
+            ``W_cols`` (i.e. every covariate is also a candidate effect modifier).
         model_y : estimator, optional
             Predictive model for the outcome nuisance function. If ``None``,
             auto-selected based on outcome type:
@@ -2803,6 +2807,21 @@ class CausalInferenceModel:
             W_cols = dummy_cols + bin_vars + cont_vars
         else:
             dummy_cols = []
+
+        # ---- Expand raw categorical names in X_cols into their dummy columns ----
+        # Lets callers pass X_cols=['organization', 'region', ...] and have the
+        # one-hot-encoded dummy columns resolved automatically, mirroring how
+        # W_cols is built. Any entries already matching existing (non-dropped)
+        # columns in df pass through unchanged.
+        if X_cols is not None and dummy_cols:
+            expanded_X_cols = []
+            for col in X_cols:
+                matches = [d for d in dummy_cols if d.startswith(f"{col}_")]
+                if matches:
+                    expanded_X_cols.extend(matches)
+                else:
+                    expanded_X_cols.append(col)
+            X_cols = expanded_X_cols
 
         # ---- Column name sanitization ----
         rename_map = {c: self._clean_column_name(c) for c in df.columns}

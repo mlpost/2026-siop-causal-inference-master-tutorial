@@ -26,14 +26,14 @@ UNIVARIATE BALANCE (SMD):
 
 MULTIVARIATE OVERLAP (Propensity Score):
 --------------------------------------------------------------------------------
-  Separability AUC:         0.657
+  Separability AUC:         0.662
     → Good: Reasonable multivariate overlap
 
-  Common support width:     0.101
-  Treated in overlap:       87.8%
-  Controls in overlap:      93.9%
+  Common support width:     0.100
+  Treated in overlap:       88.6%
+  Controls in overlap:      93.2%
 
-  ⚠️  63 treated units outside common support!
+  ⚠️  59 treated units outside common support!
      These require EXTRAPOLATION for causal inference.
 
 ASSESSMENT:
@@ -60,19 +60,19 @@ UNIVARIATE BALANCE (SMD):
 --------------------------------------------------------------------------------
   Total variables:          10
   Severe imbalance (>0.5):  0 (0.0%)
-  Mean |SMD|:               0.118
+  Mean |SMD|:               0.119
   Max |SMD|:                0.402
 
 MULTIVARIATE OVERLAP (Propensity Score):
 --------------------------------------------------------------------------------
-  Separability AUC:         0.658
+  Separability AUC:         0.663
     → Good: Reasonable multivariate overlap
 
-  Common support width:     0.103
-  Treated in overlap:       89.4%
+  Common support width:     0.100
+  Treated in overlap:       88.0%
   Controls in overlap:      93.1%
 
-  ⚠️  55 treated units outside common support!
+  ⚠️  62 treated units outside common support!
      These require EXTRAPOLATION for causal inference.
 
 ASSESSMENT:
@@ -99,17 +99,17 @@ UNIVARIATE BALANCE (SMD):
 --------------------------------------------------------------------------------
   Total variables:          10
   Severe imbalance (>0.5):  0 (0.0%)
-  Mean |SMD|:               0.122
+  Mean |SMD|:               0.123
   Max |SMD|:                0.402
 
 MULTIVARIATE OVERLAP (Propensity Score):
 --------------------------------------------------------------------------------
-  Separability AUC:         0.662
+  Separability AUC:         0.664
     → Good: Reasonable multivariate overlap
 
-  Common support width:     0.103
+  Common support width:     0.101
   Treated in overlap:       88.6%
-  Controls in overlap:      93.5%
+  Controls in overlap:      91.5%
 
   ⚠️  59 treated units outside common support!
      These require EXTRAPOLATION for causal inference.

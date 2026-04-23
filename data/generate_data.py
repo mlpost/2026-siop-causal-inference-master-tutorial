@@ -82,6 +82,17 @@ genders = np.random.choice(GENDERS, size=N_TOTAL, p=gender_probs)
 ages = np.random.normal(38, 6, N_TOTAL).clip(25, 60).round().astype(int)
 tenures = np.random.gamma(3, 4, N_TOTAL).clip(1, 120).round().astype(int)
 
+# num_direct_reports and tot_span_of_control are role attributes that also
+# act as HTE modifiers for manager_efficacy (see SECTION 6). They are drawn
+# from an auxiliary RNG so that adding / re-ordering them here does NOT
+# shift the main seeded stream used for baselines, outcomes, retention, and
+# team assignment -- those outputs remain byte-for-byte stable whenever the
+# main DGP is unchanged.
+_aux_rng = np.random.RandomState(SEED + 1)
+num_direct_reports = _aux_rng.randint(5, 13, N_TOTAL)
+extra_span = _aux_rng.gamma(2, 5, N_TOTAL).round().astype(int)
+tot_span_of_control = np.clip(num_direct_reports + extra_span, num_direct_reports, 50).astype(int)
+
 print(f"[OK] Generated demographics for {N_TOTAL} managers")
 
 # ============================================================================
@@ -200,7 +211,9 @@ def generate_outcome_with_baseline(base_mean, base_sd, treatment_effect_d,
     baseline_component = baseline_r * bl_centered
     treatment_effect = treatment_effect_d * base_sd * treatment
 
-    # Heterogeneous treatment effect (e.g. stronger for Digital; optional second mask)
+    # Heterogeneous treatment effect: hetero_mask may be a 0/1 indicator or a
+    # continuous value in [0, 1] that scales the incremental effect; an optional
+    # second mask adds a further continuous / binary gradient on top.
     if hetero_mask is not None:
         treatment_effect = treatment_effect + hetero_extra_d * base_sd * treatment * hetero_mask
     if hetero_mask_2 is not None:
@@ -216,25 +229,36 @@ def generate_outcome_with_baseline(base_mean, base_sd, treatment_effect_d,
     return scores
 
 
-# Digital heterogeneity mask (stronger efficacy treatment in Digital org)
-is_digital = (organizations == 'Digital').astype(float)
+# Heterogeneous treatment effects on manager_efficacy only (continuous gradients).
+# Top HTE:    num_direct_reports (effect grows with span of responsibility).
+# Second HTE: tenure_months      (effect is larger for newer managers).
+# Both modifiers are scaled to [0, 1] so the incremental Cohen's d adds smoothly
+# to the base effect, which gives Causal Forest a continuous signal to split on.
+# workload_index_mgr and stay_intention_index_mgr have NO HTE (by design).
 
-# Stronger efficacy treatment effect when tenure is at or below sample median
-tenure_median = float(np.median(tenures))
-is_low_tenure = (tenures <= tenure_median).astype(float)
+# --- Top HTE modifier: num_direct_reports in [5..12] -> scaled in [0, 1]
+#     (mean ~0.5). Managers with more direct reports benefit more from training.
+nd_reports_scaled = (num_direct_reports.astype(float) - 5.0) / 7.0
 
-# --- Manager Efficacy Index: base d 0.33 (IPTW marginal d ~0.35+ → E-value ~2–3);
-#     Digital +0.15; tenure<=median +0.10
+# --- Second HTE modifier: tenure_months mapped so that 0 months -> 1.0 and
+#     60+ months -> 0.0 (mean ~0.80 because tenure is right-skewed and most
+#     managers sit below 60 months). Lower-tenure managers benefit more.
+low_tenure_scaled = np.clip(1.0 - tenures.astype(float) / 60.0, 0.0, 1.0)
+
+# --- Manager Efficacy Index: base d 0.33 + continuous HTE gradients.
+#     Peak incremental d: +0.15 at max direct reports (12), +0.05 at brand-new
+#     tenure (0 months). Average marginal d contribution from HTE ~ 0.075+0.04,
+#     so the IPTW marginal Cohen's d stays comparable to the previous design.
 manager_efficacy = generate_outcome_with_baseline(
     base_mean=3.4, base_sd=0.90, treatment_effect_d=0.33,
     treatment=treatment, baseline=baseline_manager_efficacy,
     baseline_r=0.60,
-    hetero_mask=is_digital, hetero_extra_d=0.15,
-    hetero_mask_2=is_low_tenure, hetero_extra_d_2=0.10,
+    hetero_mask=nd_reports_scaled, hetero_extra_d=0.15,
+    hetero_mask_2=low_tenure_scaled, hetero_extra_d_2=0.05,
 )
 print(
-    f"  [OK] manager_efficacy_index  (d0.33, Digital extra +0.15, "
-    f"tenure<=median +0.10; median tenure={tenure_median:.0f} mo)"
+    "  [OK] manager_efficacy_index  (d0.33, +0.15 * direct_reports_scaled [top HTE], "
+    "+0.05 * low_tenure_scaled [second HTE])"
 )
 
 # --- Workload Index (Manager): no treatment effect (d 0; outcome = baseline + noise)
@@ -276,30 +300,39 @@ def generate_retention_with_baseline(base_rate, treatment_or, treatment,
     probs = expit(logits)
     return (np.random.uniform(size=len(treatment)) < probs).astype(int)
 
-# 3-month: base_rate 0.90, OR 2.0, baseline stay intention coefficient 0.30
+# Retention DGP is deliberately FRONT-LOADED (non-proportional hazards).
+# The treatment effect is concentrated in the first 3 months and attenuates
+# to null by 6-9 months. This creates a textbook PH violation (monotone
+# decay of the log-hazard-ratio over time) that the Schoenfeld residual
+# test should reject and that a time-interaction Cox model recovers cleanly.
+
+# 3-month: base_rate 0.88, OR 4.0 (strong early effect), baseline stay-
+# intention coefficient 0.30. Implied period HR ~ 0.27 (highly significant).
 retention_3mo = generate_retention_with_baseline(
-    base_rate=0.90, treatment_or=2.0, treatment=treatment,
+    base_rate=0.88, treatment_or=4.0, treatment=treatment,
     baseline_stay_intent=baseline_stay_intention,
 )
 
-# 6-month: CONDITIONAL on surviving to 3 months
-# target cumulative: treated ~93 %, control ~86 %
-p_surv_6_treated = 0.93 / 0.95
-p_surv_6_control = 0.86 / 0.90
+# 6-month: CONDITIONAL on surviving to 3 months.
+# Mild residual advantage (treated 0.965 vs control 0.945) -> borderline
+# period-specific HR ~0.64 given sparse treated events.
+# Target cumulative: treated ~93 %, control ~83 %.
+p_surv_6_treated = 0.965
+p_surv_6_control = 0.945
 cond_prob_6 = np.where(treatment == 1, p_surv_6_treated, p_surv_6_control)
 retention_6mo = retention_3mo * (np.random.binomial(1, cond_prob_6, N_TOTAL))
 
-# 9-month: conditional
-# target cumulative: treated ~91 %, control ~83 %
-p_surv_9_treated = 0.91 / 0.93
-p_surv_9_control = 0.83 / 0.86
+# 9-month: conditional. Treatment effect is NULL from here on.
+# Target cumulative: treated ~89 %, control ~79 %.
+p_surv_9_treated = 0.955
+p_surv_9_control = 0.955
 cond_prob_9 = np.where(treatment == 1, p_surv_9_treated, p_surv_9_control)
 retention_9mo = retention_6mo * (np.random.binomial(1, cond_prob_9, N_TOTAL))
 
-# 12-month: conditional
-# target cumulative: treated ~89 %, control ~80 %
-p_surv_12_treated = 0.89 / 0.91
-p_surv_12_control = 0.80 / 0.83
+# 12-month: conditional. Treatment effect is NULL.
+# Target cumulative: treated ~85 %, control ~76 %.
+p_surv_12_treated = 0.955
+p_surv_12_control = 0.955
 cond_prob_12 = np.where(treatment == 1, p_surv_12_treated, p_surv_12_control)
 retention_12mo = retention_9mo * (np.random.binomial(1, cond_prob_12, N_TOTAL))
 
@@ -384,14 +417,8 @@ print(f"  [OK] Survey outcomes set to missing for {n_blank_survey} managers (no 
 # ============================================================================
 # SECTION 8: ASSEMBLE MANAGER DATAFRAME
 # ============================================================================
-
-# --- num_direct_reports: how many direct reports each manager has (5-12) ---
-num_direct_reports = np.random.randint(5, 13, N_TOTAL)
-
-# --- tot_span_of_control: total span >= num_direct_reports, range 5-50 ---
-# Most managers have a modest indirect span; some have a very large one
-extra_span = np.random.gamma(2, 5, N_TOTAL).round().astype(int)
-tot_span_of_control = np.clip(num_direct_reports + extra_span, num_direct_reports, 50).astype(int)
+# (num_direct_reports and tot_span_of_control are generated in SECTION 2 so
+# they can serve as HTE modifiers for manager_efficacy in SECTION 6.)
 
 # --- team_id: group managers into within-organization teams of 5-12 ---
 team_ids = np.zeros(N_TOTAL, dtype=int)
@@ -578,18 +605,31 @@ print("\n--- MANAGER EFFICACY (treated vs control, Cohen's d) ---")
 me_t = df_managers[df_managers['treatment'] == 1]['manager_efficacy_index'].dropna()
 me_c = df_managers[df_managers['treatment'] == 0]['manager_efficacy_index'].dropna()
 d_overall = smd_continuous(me_t, me_c)
-print(f"  Overall              :  d = {d_overall:.3f}  (expected ~0.33+ crude SMD)")
+print(f"  Overall                    :  d = {d_overall:.3f}  (expected ~0.33-0.45 crude SMD)")
 
-dig_t = df_managers[(df_managers['treatment'] == 1) & (df_managers['organization'] == 'Digital')]['manager_efficacy_index'].dropna()
-dig_c = df_managers[(df_managers['treatment'] == 0) & (df_managers['organization'] == 'Digital')]['manager_efficacy_index'].dropna()
-d_dig = smd_continuous(dig_t, dig_c)
-print(f"  Digital org only     :  d = {d_dig:.3f}  (expected ~0.45-0.55)")
+# Top HTE check: managers with large spans (>=9 direct reports) vs small (<=6).
+high_span_mask = df_managers['num_direct_reports'] >= 9
+low_span_mask  = df_managers['num_direct_reports'] <= 6
+hs_t = df_managers[high_span_mask & (df_managers['treatment'] == 1)]['manager_efficacy_index'].dropna()
+hs_c = df_managers[high_span_mask & (df_managers['treatment'] == 0)]['manager_efficacy_index'].dropna()
+ls_t = df_managers[low_span_mask  & (df_managers['treatment'] == 1)]['manager_efficacy_index'].dropna()
+ls_c = df_managers[low_span_mask  & (df_managers['treatment'] == 0)]['manager_efficacy_index'].dropna()
+d_high_span = smd_continuous(hs_t, hs_c)
+d_low_span  = smd_continuous(ls_t, ls_c)
+print(f"  High direct reports (>=9)  :  d = {d_high_span:.3f}  (expected larger than low-span)")
+print(f"  Low  direct reports (<=6)  :  d = {d_low_span:.3f}  (expected ~ base 0.33)")
 
-low_mask = df_managers['tenure_months'] <= tenure_median
-lt_t = df_managers[low_mask & (df_managers['treatment'] == 1)]['manager_efficacy_index'].dropna()
-lt_c = df_managers[low_mask & (df_managers['treatment'] == 0)]['manager_efficacy_index'].dropna()
-d_low_ten = smd_continuous(lt_t, lt_c)
-print(f"  Tenure <= median only :  d = {d_low_ten:.3f}  (expected ~0.30-0.45)")
+# Second HTE check: low-tenure managers should see a somewhat larger effect.
+low_ten_mask  = df_managers['tenure_months'] <= 6
+high_ten_mask = df_managers['tenure_months'] >= 24
+lt_t = df_managers[low_ten_mask  & (df_managers['treatment'] == 1)]['manager_efficacy_index'].dropna()
+lt_c = df_managers[low_ten_mask  & (df_managers['treatment'] == 0)]['manager_efficacy_index'].dropna()
+ht_t = df_managers[high_ten_mask & (df_managers['treatment'] == 1)]['manager_efficacy_index'].dropna()
+ht_c = df_managers[high_ten_mask & (df_managers['treatment'] == 0)]['manager_efficacy_index'].dropna()
+d_low_ten  = smd_continuous(lt_t, lt_c)
+d_high_ten = smd_continuous(ht_t, ht_c)
+print(f"  Tenure <=6 months          :  d = {d_low_ten:.3f}  (expected slightly larger than high-tenure)")
+print(f"  Tenure >=24 months         :  d = {d_high_ten:.3f}  (expected ~ base 0.33)")
 
 print("\n--- STAY INTENTION (treated vs control, Cohen's d) ---")
 si_t = df_managers[df_managers['treatment'] == 1]['stay_intention_index_mgr'].dropna()

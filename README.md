@@ -8,15 +8,14 @@ A hands-on course on estimating causal treatment effects from observational HR d
 
 This course walks through a real-world people analytics use case: **evaluating whether a manager training program causally improves leadership outcomes and team retention.** You'll learn to:
 
-- Estimate **Average Treatment Effects (ATE)** and **Average Treatment Effects on the Treated (ATT)** from observational data
-- Build and diagnose **inverse probability of treatment weights** (stabilized, trimmed)
-- Fit **IPTW-weighted outcome models with covariate adjustment** using GEE with cluster-robust standard errors
-- Summarize retention using **RMST and IPTW-weighted survival differences** alongside time-varying hazard ratios
-- Compare primary estimates against a **cluster-robust DoubleML** ATE robustness check
-- Assess covariate balance before and after weighting
-- Conduct **E-value sensitivity analyses** to evaluate robustness to unmeasured confounding
-- Interpret and communicate causal findings to technical and non-technical audiences
-- Understand when and why ATE vs. ATT estimands differ
+- **Frame the causal question** — choose the right estimand for the question (ATE vs. ATT) and understand when and why they diverge
+- **Diagnose before modeling** — multicollinearity (VIF/GVIF), covariate overlap, positivity, and estimand feasibility
+- **Estimate with IPTW** — build, stabilize, trim, and diagnose inverse probability of treatment weights, then verify covariate balance pre- vs. post-weighting
+- **Model survey outcomes** — IPTW + covariate-adjusted GEE with cluster-robust standard errors
+- **Model retention (time-to-event)** — IPTW-weighted Kaplan–Meier (descriptive), **RMST** (primary causal estimand), and **Cox PH with time interactions** (inferential, when proportional hazards is violated)
+- **Check robustness** — cluster-robust **DoubleML (PLR)** as an alternative identification strategy, and **E-value sensitivity analysis** for unmeasured confounding
+- **Explore heterogeneity** — use a **Causal Forest (DML)** to surface conditional average treatment effects (CATE) along actionable moderators — who benefits most
+- **Communicate results** — translate technical findings into stakeholder-ready recommendations with transparent caveats
 ---
 
 ## Prerequisites
