@@ -20,6 +20,7 @@ Date: 2026
 import numpy as np
 import pandas as pd
 from datetime import date, timedelta
+from pathlib import Path
 from scipy import stats
 from scipy.special import expit  # logistic function
 import warnings
@@ -31,6 +32,12 @@ warnings.filterwarnings('ignore')
 
 SEED = 42
 np.random.seed(SEED)
+
+# Resolve output paths against the script's own folder so outputs always land
+# in data/ regardless of the CWD the script is invoked from.
+DATA_DIR = Path(__file__).resolve().parent
+CSV_PATH = DATA_DIR / 'manager_data.csv'
+EXCEL_PATH = DATA_DIR / 'data_descriptives.xlsx'
 
 # Sample sizes
 N_TOTAL = 9000
@@ -645,10 +652,10 @@ print("\n" + "=" * 80)
 print("EXPORTING DATA")
 print("=" * 80)
 
-df_managers.to_csv('./manager_data.csv', index=False)
+df_managers.to_csv(CSV_PATH, index=False)
 
 print("\n[OK] Data exported to:")
-print("  - ./manager_data.csv")
+print(f"  - {CSV_PATH}")
 
 # ============================================================================
 # SECTION 15: EXCEL REPORT
@@ -779,9 +786,9 @@ def descriptives_by_group(df, variables, group_col='treatment',
 
 
 # ---------------------------------------------------------------------------
-# Create workbook
+# Create workbook (EXCEL_PATH is defined at the top of the script, anchored to
+# the data/ folder via Path(__file__).resolve().parent).
 # ---------------------------------------------------------------------------
-EXCEL_PATH = './data_descriptives.xlsx'
 wb = Workbook()
 
 # ===== SHEET 1: README =====================================================
@@ -1074,6 +1081,6 @@ print("\n" + "=" * 80)
 print("DATA GENERATION COMPLETE")
 print("=" * 80)
 print(f"\nFiles created:")
-print(f"  ./manager_data.csv        ({df_managers.shape[0]} rows x {df_managers.shape[1]} cols)")
-print(f"  ./data_descriptives.xlsx  (8 sheets)")
+print(f"  {CSV_PATH}  ({df_managers.shape[0]} rows x {df_managers.shape[1]} cols)")
+print(f"  {EXCEL_PATH}  (8 sheets)")
 
