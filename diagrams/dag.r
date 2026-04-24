@@ -5,7 +5,7 @@
 # The daggle app—a tool to support learning and teaching the graphical rules of selecting adjustment variables 
 # using directed acyclic graphs, International Journal of Epidemiology, 2023;, dyad038 https://doi.org/10.1093/ije/dyad038
 
-# outcomes: Manager Efficacy, Workload, Turnover Intention, Retention
+# outcomes: Manager Efficacy, Workload, Stay Intention, Retention
 # treatment: Manager Training
 # confounders: Gender, age, tenure, performance rating, organization, job family, region, num. direct reports, baseline survey scores, promotion intensity (driven by organization)
 # all confounders -> treatment and outcome
@@ -41,7 +41,7 @@ manager_training_dag <- dagify(
   # Treatment effect on outcomes (collapsed)
   outcomes ~ manager_training,
   
-  # Organization drives promotion intensity (mediator pathway)
+  # Organization drives promotion intensity (instrument-like encouragement: Z -> T only)
   promotion_intensity ~ organization,
   manager_training ~ promotion_intensity,
   
@@ -71,9 +71,9 @@ manager_training_dag <- dagify(
   # Define node labels for display
   labels = c(
     manager_training = "Manager Training\n(T)",
-    outcomes = "Outcomes\n(Efficacy, Workload,\nTurnover, Retention)\n(Y)",
+    outcomes = "Outcomes\n(Efficacy, Workload,\nStay Intention, Retention)\n(Y)",
     organization = "Organization\n(X)",
-    promotion_intensity = "Promotion\nIntensity\n(M)",
+    promotion_intensity = "Promotion\nIntensity\n(Z)",
     employee_demographics = "Employee\nDemographics\n(X)",
     performance_career = "Performance\n& Career\n(X)",
     role_structure = "Role &\nStructure\n(X)",
@@ -92,11 +92,11 @@ manager_training_dag <- dagify(
 # - Treatment: intervention whose effect we estimate
 # - Outcome: primary endpoint(s)
 # - Confounder: causes both treatment and outcome; may bias estimates if unadjusted
-# - Mediator: on causal pathway; adjustment changes interpretation (total vs. direct effect)
+  # - Instrument-like (Z): pre-treatment org-level encouragement; Z -> T only (not on T -> Y path)
 role_mapping <- c(
   manager_training = "Treatment (Exposure)",
   outcomes = "Outcome",
-  promotion_intensity = "Mediator",
+  promotion_intensity = "Instrument-like (Z)",
   organization = "Adjusted Confounder",
   employee_demographics = "Adjusted Confounder",
   performance_career = "Adjusted Confounder",
@@ -106,13 +106,13 @@ role_mapping <- c(
 role_colors <- c(
   "Treatment (Exposure)" = "#2E86AB",
   "Outcome" = "#A23B72",
-  "Mediator" = "#C73E1D",
+  "Instrument-like (Z)" = "#F4A261",
   "Adjusted Confounder" = "#6B7280"
 )
 role_shapes <- c(
   "Treatment (Exposure)" = 19,
   "Outcome" = 19,
-  "Mediator" = 19,
+  "Instrument-like (Z)" = 17,
   "Adjusted Confounder" = 15
 )
 
@@ -157,7 +157,7 @@ dag_plot <- manager_training_dag %>%
   guides(
     color = guide_legend(
       title = "",
-      override.aes = list(size = 5, shape = c(19, 19, 19, 15)),
+      override.aes = list(size = 5, shape = c(19, 19, 17, 15)),
       order = 1
     ),
     fill = "none",
@@ -186,8 +186,10 @@ print(dag_plot)
 ggsave("./diagrams/manager_training_dag.png", dag_plot, width = 12, height = 8, dpi = 300)
 
 
-# ---- Simplified DAG: Performance & Career Focus (use for collider teaching demo) ----
+# ---- Simplified DAG: Performance & Career Focus (confounder structure demo) ----
 # 3 nodes only: Performance & Career, Manager Training, Outcomes
+# Note: this is a confounder structure (X -> T, X -> Y, T -> Y), not a collider.
+# This image is not referenced by the notebook (Slides 7/8 use _detail1/_detail2 PNGs).
 
 # Define node coordinates for simplified 3-node layout (left-to-right)
 coord_df_simple <- data.frame(
@@ -203,7 +205,7 @@ manager_training_dag_simple <- dagify(
   outcomes ~ manager_training,
   labels = c(
     manager_training = "Manager Training\n(T)",
-    outcomes = "Outcomes\n(Efficacy, Workload,\nTurnover, Retention)\n(Y)",
+    outcomes = "Outcomes\n(Efficacy, Workload,\nStay Intention, Retention)\n(Y)",
     performance_career = "Performance\n& Career\n(X)"
   ),
   exposure = "manager_training",
@@ -291,4 +293,4 @@ dag_plot_simple <- manager_training_dag_simple %>%
 print(dag_plot_simple)
 
 # Save simplified plot
-ggsave("./diagrams/dag_collider_ex.png", dag_plot_simple, width = 12, height = 8, dpi = 300)
+ggsave("./diagrams/dag_confounder_ex.png", dag_plot_simple, width = 12, height = 8, dpi = 300)
