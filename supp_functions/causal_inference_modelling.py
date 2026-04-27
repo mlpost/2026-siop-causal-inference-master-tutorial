@@ -4691,8 +4691,12 @@ class CausalInferenceModel:
             t_clip = np.append(times[mask], horizon)
             p_clip = np.append(probs[mask], probs[mask][-1] if mask.any() else 1.0)
 
-            # Trapezoidal integration
-            rmst = np.trapezoid(p_clip, t_clip)
+            # Trapezoidal integration.
+            # np.trapezoid was added in NumPy 2.0 and np.trapz was removed in
+            # later 2.x releases, so we cannot use np.trapz as a getattr default
+            # (it would be evaluated eagerly and raise AttributeError).
+            _trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+            rmst = _trapz(p_clip, t_clip)
             return float(rmst)
 
         rmst_treated = _rmst_from_kmf(kmf_treated, time_horizon)
