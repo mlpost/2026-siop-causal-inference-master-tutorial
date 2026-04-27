@@ -20,3 +20,7 @@ Thumbs.db
 *.pyc
 *.pyc
 *.pyc
+
+# Agent Skills
+.cursor/skills/
+.github/
