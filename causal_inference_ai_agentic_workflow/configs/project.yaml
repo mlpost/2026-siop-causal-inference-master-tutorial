@@ -1,0 +1,41 @@
+project:
+  name: "Manager Leadership Development Program Evaluation"
+
+task:
+  problem: "Last year's engagement survey indicated a strong need for improved management skills. Leadership is also concerned about consistently high manager turnover following recent organizational changes."
+  solution: "L&D conducted a 3-month leadership development program (Jan–Mar) to better equip managers to lead through change and decrease turnover."
+  ask: "L&D has a review with HR leadership and needs data to demonstrate impact and inform whether to continue scaling or make changes."
+
+scope:
+  treated_population: "500 trained managers who participated in the Jan–Mar program (~5.6% of total)"
+  control_population: "8,500 untrained managers who did not participate"
+  notes:
+    - "Voluntary participation: Any manager who signed up could attend."
+    - "Uneven promotion: Some departments actively encouraged participation; others sent a single email."
+
+key_variables:
+  pre_treatment_covariates:
+    - "measured in January, before treatment"
+    - demographics: Gender, age, tenure
+    - organizational: Region, organization, job family
+    - team_structure: Team size, total span of control
+    - performance: Performance rating
+  outcomes:
+    survey:
+      - "June, 1–5 scale, treated as continuous"
+      - "Baseline & follow-up available: Both prior-year (June) and current-year (June) survey scores are available, allowing us to control for pre-existing differences."
+      - "Manager Efficacy Index: Self-assessed confidence in leading and supporting teams through change"
+      - "Workload Index: Self-assessed perceptions of workload, work-life balance, and well-being"
+      - "Stay Intention Index: Self-assessed intention to stay (higher score = stronger intent to stay)"
+    retention:
+      - "Jan–Dec - binary survival flags: 3 months (April) · 6 months (July) · 9 months (October) · 12 months (January+1)"
+      - "Exit dates available: For those who left, we have exit dates to determine exact timing of attrition."
+  treatment:
+    - "Entered the leadership development program (binary: 1 = entered, 0 = not entered)"
+
+raw_data_files:
+  manager_data: "data/raw/manager_data.csv"
+
+preferences:
+  explain_results_simply: true
+  ask_for_missing_important_info: true
