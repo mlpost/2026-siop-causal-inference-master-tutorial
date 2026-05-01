@@ -8285,7 +8285,7 @@ a.anchor-link {
 <div class="toc-item" data-slide="3"><span>Slide 4</span>Good, Harmful &amp; Bad Controls</div>
 <div class="toc-item discuss" data-slide="4"><span>Slide 5</span>💬 Discussion: Build Our DAG</div>
 <div class="toc-item" data-slide="5"><span>Slide 6</span>Our Causal DAG</div>
-<div class="toc-item caution" data-slide="7"><span>Slide 8</span>Further Learning: Career Promotion (Post-Treatment Variable)</div>
+<div class="toc-item caution" data-slide="6"><span>Slide 7</span>Further Learning: Descendant/Mediator Example</div>
 </div>
 </div>
 <!-- Slide 2: What is a DAG? -->
@@ -11809,7 +11809,7 @@ OVERALL STEP 2 SUMMARY: ESTIMAND SELECTION GUIDANCE
 <strong>AUC &lt; 0.7</strong> with ~90% overlap in both directions — observed covariates do not strongly predict treatment. This is a <strong>necessary but not sufficient</strong> condition for valid IPTW adjustment. Unobserved confounding is still possible and is addressed via E-value sensitivity analysis later in the workflow.
                     </div>
 <div class="takeaway-box">
-<strong>Moderate imbalance</strong> detected across region, performance categories, organization, and job family. Will be addressed via <strong>IPTW + GEE</strong>.
+<strong>Moderate imbalance</strong> detected across performance and organization. Will be addressed via <strong>IPTW + GEE</strong>.
                     </div>
 </div>
 </div>
@@ -12048,7 +12048,7 @@ OVERALL STEP 2 SUMMARY: ESTIMAND SELECTION GUIDANCE
 <li>Fitted using <strong>logistic regression</strong> with all individuals in the dataset</li>
 </ul>
 <div class="note">
-<strong>Key insight:</strong> We're modeling the <strong>treatment assignment mechanism</strong> — what factors predict who received training vs. who didn't? This allows us to identify individuals who were "unlikely" to receive the treatment they actually got.
+<strong>Key insight:</strong> We're modeling the <strong>treatment assignment mechanism</strong> — what factors predict who received training vs. who didn't? This allows us to identify individuals who were "unlikely" to receive the treatment they actually got (and vice versa).
             </div>
 <div class="return-toc"><button class="return-btn" data-slide="0">← Return to Overview</button></div>
 </div>
@@ -12471,88 +12471,68 @@ OVERALL STEP 2 SUMMARY: ESTIMAND SELECTION GUIDANCE
 <h2>Summary: Model Design Choices</h2>
 <p>This section walks through each design choice in the IPTW + GEE pipeline, organized by the problem each solves. Click any item below to jump to that section.</p>
 <div class="toc-grid">
-<div class="toc-item" data-slide="1"><span>Slides 2–3 · Why IPTW?</span>Why Weighting Over Regression Adjustment</div>
-<div class="toc-item" data-slide="3"><span>Slides 4–6 · Weighting</span>IPTW, ATE Weights, Stabilized Weights</div>
-<div class="toc-item" data-slide="6"><span>Slide 7 · Variance Control</span>Weight Trimming &amp; Clipping</div>
-<div class="toc-item" data-slide="7"><span>Slide 8 · Clustering</span>GEE Clustering</div>
-<div class="toc-item" data-slide="8"><span>Slide 9 · Robustness</span>Sandwich Standard Errors</div>
-<div class="toc-item" data-slide="9"><span>Slide 10 · Model Robustness</span>IPTW + Covariate Adjustment</div>
-<div class="toc-item" data-slide="10"><span>Slide 11 · Inference</span>Multiple Testing Correction (FDR)</div>
+<div class="toc-item" data-slide="1"><span>Slide 2 · Why IPTW?</span>Why Weighting Over Regression Adjustment</div>
+<div class="toc-item" data-slide="2"><span>Slides 3–5 · Weighting</span>IPTW, ATE Weights, Stabilized Weights</div>
+<div class="toc-item" data-slide="5"><span>Slide 6 · Variance Control</span>Weight Trimming &amp; Clipping</div>
+<div class="toc-item" data-slide="6"><span>Slide 7 · Clustering</span>GEE Clustering</div>
+<div class="toc-item" data-slide="7"><span>Slide 8 · Robustness</span>Sandwich Standard Errors</div>
+<div class="toc-item" data-slide="8"><span>Slide 9 · Model Robustness</span>IPTW + Covariate Adjustment</div>
+<div class="toc-item" data-slide="9"><span>Slide 10 · Inference</span>Multiple Testing Correction (FDR)</div>
 </div>
 </div>
-<!-- Slide 2: Why IPTW Over Regression? (NEW) -->
+<!-- Slide 2: Why IPTW Over Regression? -->
 <div class="slide">
 <span class="tag tag-comparison">Why IPTW?</span>
-<h2>Why Weighting Instead of Regression Adjustment?</h2>
+<h2>Why IPTW + GEE Instead of OLS with Covariates?</h2>
 <hr class="divider"/>
-<p>A natural question: why not simply run <code>outcome ~ treatment + covariates</code> with OLS? Both approaches aim to adjust for confounders, but they differ in fundamental ways.</p>
+<p>A natural question: why not simply run <code>outcome ~ treatment + covariates</code> with OLS? Both approaches ultimately use a regression model to estimate the effect — the difference is in how confounding is handled <em>before</em> that step.</p>
 <table class="comparison-table">
 <thead>
 <tr>
 <th style="width:30%">Dimension</th>
-<th style="width:35%">IPW</th>
-<th style="width:35%">Multivariate Regression</th>
+<th style="width:35%">IPTW + GEE</th>
+<th style="width:35%">OLS with Covariates</th>
 </tr>
 </thead>
 <tbody>
 <tr>
+<td><strong>What handles confounding</strong></td>
+<td><span class="pro">+</span> The <strong>weights</strong> — built from propensity scores before the outcome model ever runs</td>
+<td><span class="con">−</span> The <strong>regression model itself</strong> — covariates are included directly and do all the adjustment work</td>
+</tr>
+<tr>
 <td><strong>Outcome model assumptions</strong></td>
-<td><span class="pro">+</span> No parametric assumptions on the potential outcomes or treatment response function</td>
-<td><span class="con">−</span> Requires a parametric assumption on the conditional expectation (e.g., linearity), effectively assuming specific smoothness in potential outcomes</td>
+<td><span class="pro">+</span> GEE still makes parametric assumptions, but <strong>only for effect estimation</strong> — confounding is already resolved by the weights</td>
+<td><span class="con">−</span> Parametric assumptions do double duty: adjusting for confounding <strong>and</strong> estimating the effect — if the model is wrong, both fail</td>
 </tr>
 <tr>
 <td><strong>Positivity transparency</strong></td>
-<td><span class="pro">+</span> Violations are immediately visible: plot the propensity score distribution and see where overlap fails</td>
-<td><span class="con">−</span> Silently extrapolates into covariate regions with no observations from one group — violations are hidden</td>
+<td><span class="pro">+</span> Violations are immediately visible: plot the propensity score distribution and see where overlap fails — before touching outcomes</td>
+<td><span class="con">−</span> Silently extrapolates into covariate regions with no observations from one group — violations are hidden inside the model</td>
 </tr>
 <tr>
 <td><strong>What ATE it estimates</strong></td>
-<td><span class="pro">+</span> Weights each unit equally (by 1/PS), targeting the population ATE directly</td>
-<td><span class="con">−</span> Weights subgroup effects by conditional variance of treatment — artificially upweights groups where treatment assignment varied most</td>
+<td><span class="pro">+</span> Weights each unit by 1/PS, targeting the <strong>true population ATE</strong> directly</td>
+<td><span class="con">−</span> Implicitly upweights subgroups where treatment varied most — the resulting "average" effect is not truly population-representative</td>
 </tr>
 <tr>
 <td><strong>Design/analysis separation</strong></td>
-<td><span class="pro">+</span> Balance can be verified <em>before</em> looking at outcomes (see overlap diagnostics in Checkpoint 2)</td>
-<td><span class="con">−</span> Confounding adjustment and effect estimation happen simultaneously — no independent verification</td>
+<td><span class="pro">+</span> Balance is verified <em>independently</em>, before outcome analysis (see overlap diagnostics in Checkpoint 2)</td>
+<td><span class="con">−</span> Confounding adjustment and effect estimation happen simultaneously — no independent verification step</td>
+</tr>
+<tr>
+<td><strong>If the model is misspecified</strong></td>
+<td><span class="pro">+</span> Confounding adjustment survives — only effect estimation is at risk</td>
+<td><span class="con">−</span> Both confounding adjustment and effect estimation break down together</td>
 </tr>
 </tbody>
 </table>
+<p><strong>Key takeaway:</strong> IPTW + GEE is a <strong>regression run on a pre-balanced dataset</strong>. Observed confounding is solved transparently and verifiably <em>before</em> the outcome model runs, making the analysis more robust and auditable.</p>
 <div class="return-toc">
 <button class="return-btn" data-slide="0">← Return to Table of Contents</button>
 </div>
 </div>
-<!-- Slide 3: When Regression Wins & Our Choice (NEW) -->
-<div class="slide">
-<span class="tag tag-comparison">Why IPTW?</span>
-<h2>When Regression Has the Advantage</h2>
-<hr class="divider"/>
-<div class="row">
-<div class="col">
-<div class="section-label">Regression's strengths</div>
-<ul>
-<li><strong>Efficiency:</strong> With baseline measures of the same outcome (which we have), ANCOVA-style regression directly absorbs within-subject variance and typically produces tighter confidence intervals</li>
-<li><strong>Simplicity:</strong> Easier to explain and implement; fewer moving parts that can go wrong</li>
-<li><strong>Continuous treatments:</strong> For continuous treatment variables, regression is often preferred — IPW's lack of parametric assumptions becomes a drawback when there are very few data points around specific treatment values</li>
-</ul>
-</div>
-<div class="col">
-<div class="section-label">Our decision</div>
-<p>We use <strong>IPTW + covariate-adjusted GEE</strong>, which combines both approaches:</p>
-<ul>
-<li>IPW handles confounding adjustment nonparametrically</li>
-<li>Covariate adjustment in the outcome model captures residual variance (especially via baseline measures)</li>
-<li>This covariate adjustment improves precision and reduces residual imbalance after weighting (particularly because weights were winsorized), but <strong>should not be interpreted as formally doubly robust</strong> — see Slide 10</li>
-</ul>
-<div class="note">
-<strong>Key context:</strong> Our treatment is binary (participated vs. didn't), treatment probability varies substantially across subgroups (see propensity score distributions), and we have strong baseline measures. This combination favors IPTW with covariate adjustment over pure regression.
-                    </div>
-</div>
-</div>
-<div class="return-toc">
-<button class="return-btn" data-slide="0">← Return to Table of Contents</button>
-</div>
-</div>
-<!-- Slide 4: IPTW -->
+<!-- Slide 3: IPTW -->
 <div class="slide">
 <span class="tag tag-weighting">Weighting</span>
 <h2>IPTW — Inverse Probability of Treatment Weighting</h2>
@@ -12577,7 +12557,7 @@ OVERALL STEP 2 SUMMARY: ESTIMAND SELECTION GUIDANCE
 <button class="return-btn" data-slide="0">← Return to Table of Contents</button>
 </div>
 </div>
-<!-- Slide 5: ATE Weights -->
+<!-- Slide 4: ATE Weights -->
 <div class="slide">
 <span class="tag tag-weighting">Weighting</span>
 <h2>ATE Weights</h2>
@@ -12605,7 +12585,7 @@ OVERALL STEP 2 SUMMARY: ESTIMAND SELECTION GUIDANCE
 <button class="return-btn" data-slide="0">← Return to Table of Contents</button>
 </div>
 </div>
-<!-- Slide 6: Stabilized Weights -->
+<!-- Slide 5: Stabilized Weights -->
 <div class="slide">
 <span class="tag tag-weighting">Weighting</span>
 <h2>Stabilized Weights</h2>
@@ -12631,7 +12611,7 @@ OVERALL STEP 2 SUMMARY: ESTIMAND SELECTION GUIDANCE
 <button class="return-btn" data-slide="0">← Return to Table of Contents</button>
 </div>
 </div>
-<!-- Slide 7: Trimming & Clipping -->
+<!-- Slide 6: Trimming & Clipping -->
 <div class="slide">
 <span class="tag tag-variance">Variance Control</span>
 <h2>Weight Trimming &amp; Propensity Score Clipping</h2>
@@ -12659,7 +12639,7 @@ OVERALL STEP 2 SUMMARY: ESTIMAND SELECTION GUIDANCE
 <button class="return-btn" data-slide="0">← Return to Table of Contents</button>
 </div>
 </div>
-<!-- Slide 8: GEE Clustering -->
+<!-- Slide 7: GEE Clustering -->
 <div class="slide">
 <span class="tag tag-clustering">Clustering</span>
 <h2>GEE Clustering</h2>
@@ -12686,7 +12666,7 @@ OVERALL STEP 2 SUMMARY: ESTIMAND SELECTION GUIDANCE
 <button class="return-btn" data-slide="0">← Return to Table of Contents</button>
 </div>
 </div>
-<!-- Slide 9: Sandwich SEs -->
+<!-- Slide 8: Sandwich SEs -->
 <div class="slide">
 <span class="tag tag-robustness">Robustness</span>
 <h2>Sandwich (Robust) Standard Errors</h2>
@@ -12711,7 +12691,7 @@ OVERALL STEP 2 SUMMARY: ESTIMAND SELECTION GUIDANCE
 <button class="return-btn" data-slide="0">← Return to Table of Contents</button>
 </div>
 </div>
-<!-- Slide 10: IPTW + Covariate Adjustment -->
+<!-- Slide 9: IPTW + Covariate Adjustment -->
 <div class="slide">
 <span class="tag tag-robustness">Model Robustness</span>
 <h2>IPTW + Covariate Adjustment</h2>
@@ -12739,7 +12719,7 @@ OVERALL STEP 2 SUMMARY: ESTIMAND SELECTION GUIDANCE
 <button class="return-btn" data-slide="0">← Return to Table of Contents</button>
 </div>
 </div>
-<!-- Slide 11: Multiple Testing -->
+<!-- Slide 10: Multiple Testing -->
 <div class="slide">
 <span class="tag tag-inference">Inference</span>
 <h2>Multiple Testing Correction (FDR)</h2>
@@ -12768,7 +12748,7 @@ OVERALL STEP 2 SUMMARY: ESTIMAND SELECTION GUIDANCE
 <div class="progress" id="progress3"></div>
 <div class="controls">
 <button class="nav-btn3" data-dir="-1">← Previous</button>
-<span id="counter3">1 / 11</span>
+<span id="counter3">1 / 10</span>
 <button class="nav-btn3" data-dir="1">Next →</button>
 </div>
 </div>
@@ -13262,7 +13242,7 @@ c:\Users\U1013877\OneDrive - Sanofi\Documents\GitHub\2026-siop-causal-inference-
 <ul>
 <li>We observe a treatment effect</li>
 <li>The E-value tells us: <strong>"How strong would a hidden confounder need to be to make this effect disappear?"</strong></li>
-<li>Strength is measured as a <strong>risk ratio (RR)</strong> — the ratio of odds/probabilities</li>
+<li>Strength is measured as a <strong>risk ratio (RR)</strong> — the ratio of probabilities</li>
 <li>An E-value of 2.0 means the confounder would need RR = 2.0 with both treatment and outcome</li>
 </ul>
 <h3>Key Assumption:</h3>
@@ -13890,7 +13870,7 @@ stay_intention_index_mgr    cohens_d      0.163544   1.160470       1.592004    
 </tr>
 </table>
 <h3>Pattern:</h3>
-<p>ATT effects are consistently slightly larger, consistent with <strong>positive selection</strong>: managers who chose to participate benefit somewhat more than the average manager would.</p>
+<p>ATT effects are slightly larger, consistent with <strong>positive selection</strong>: managers who chose to participate benefit somewhat more than the average manager would.</p>
 <div class="tip">
                 Both estimands tell the same <strong>qualitative story</strong>. The differences are modest, suggesting the treatment effect is fairly homogeneous across the population.
             </div>
