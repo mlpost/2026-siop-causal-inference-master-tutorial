@@ -12204,7 +12204,7 @@ OVERALL STEP 2 SUMMARY: ESTIMAND SELECTION GUIDANCE
 <p>Specification:</p>
 <ul>
 <li>Each observation weighted by \(w_i^{stab}\) from the propensity score model</li>
-<li>Clustering at the <strong>team level</strong> (by direct manager ID) with <strong>exchangeable working correlation</strong> within teams</li>
+<li>Clustering at the <strong>team level</strong>  with <strong>exchangeable working correlation</strong> within teams</li>
 <li><strong>Robust sandwich SEs</strong> handle within-team correlation and working-correlation misspecification, but treat the IPTW weights as fixed — they do <strong>not</strong> propagate first-stage propensity score uncertainty. For stricter inference, use a non-parametric bootstrap that re-estimates both stages per replicate (see Slide 9 for sandwich SE detail).</li>
 </ul>
 <div class="return-toc"><button class="return-btn" data-slide="0">← Return to Overview</button></div>
@@ -12461,6 +12461,10 @@ OVERALL STEP 2 SUMMARY: ESTIMAND SELECTION GUIDANCE
     .comparison-table td { vertical-align: top; }
     .pro { color: #28a745; font-weight: bold; }
     .con { color: #dc3545; font-weight: bold; }
+    .technique-box { background: #f8f9fa; border-left: 4px solid #007bff; padding: 12px 15px; margin: 10px 0; border-radius: 4px; }
+    .technique-box h4 { margin: 0 0 8px 0; color: #007bff; font-size: 15px; }
+    .technique-box p { margin: 5px 0; font-size: 13px; }
+    .formula-box { background: #f0f4ff; padding: 10px; border-radius: 4px; margin: 8px 0; font-family: 'Courier New', monospace; font-size: 13px; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 <div id="slideshow3">
@@ -12472,12 +12476,11 @@ OVERALL STEP 2 SUMMARY: ESTIMAND SELECTION GUIDANCE
 <p>This section walks through each design choice in the IPTW + GEE pipeline, organized by the problem each solves. Click any item below to jump to that section.</p>
 <div class="toc-grid">
 <div class="toc-item" data-slide="1"><span>Slide 2 · Why IPTW?</span>Why Weighting Over Regression Adjustment</div>
-<div class="toc-item" data-slide="2"><span>Slides 3–5 · Weighting</span>IPTW, ATE Weights, Stabilized Weights</div>
-<div class="toc-item" data-slide="5"><span>Slide 6 · Variance Control</span>Weight Trimming &amp; Clipping</div>
-<div class="toc-item" data-slide="6"><span>Slide 7 · Clustering</span>GEE Clustering</div>
-<div class="toc-item" data-slide="7"><span>Slide 8 · Robustness</span>Sandwich Standard Errors</div>
-<div class="toc-item" data-slide="8"><span>Slide 9 · Model Robustness</span>IPTW + Covariate Adjustment</div>
-<div class="toc-item" data-slide="9"><span>Slide 10 · Inference</span>Multiple Testing Correction (FDR)</div>
+<div class="toc-item" data-slide="2"><span>Slide 3 · IPTW Basics</span>Core Concept &amp; ATE Weights</div>
+<div class="toc-item" data-slide="3"><span>Slide 4 · Managing Extremes</span>Stabilizing, Clipping &amp; Trimming</div>
+<div class="toc-item" data-slide="4"><span>Slide 5 · Clustering</span>GEE Clustering &amp; Sandwich SEs</div>
+<div class="toc-item" data-slide="5"><span>Slide 6 · Model Robustness</span>IPTW + Covariate Adjustment</div>
+<div class="toc-item" data-slide="6"><span>Slide 7 · Inference</span>Multiple Testing Correction (FDR)</div>
 </div>
 </div>
 <!-- Slide 2: Why IPTW Over Regression? -->
@@ -12532,166 +12535,120 @@ OVERALL STEP 2 SUMMARY: ESTIMAND SELECTION GUIDANCE
 <button class="return-btn" data-slide="0">← Return to Table of Contents</button>
 </div>
 </div>
-<!-- Slide 3: IPTW -->
+<!-- Slide 3: IPTW Basics (Combined IPTW + ATE) -->
 <div class="slide">
 <span class="tag tag-weighting">Weighting</span>
-<h2>IPTW — Inverse Probability of Treatment Weighting</h2>
+<h2>IPTW Basics: Core Concept &amp; ATE Weights</h2>
 <hr class="divider"/>
-<div class="row">
-<div class="col">
-<div class="section-label">Problem It Solves</div>
-<p>Treatment assignment is non-random; treated and control groups differ on observed confounders.</p>
-<div class="section-label">Example</div>
-<p>Individuals who volunteered for training differ systematically from those who didn't (e.g., higher baseline performance, more tenure).</p>
-</div>
-<div class="col">
-<div class="section-label">What It Does</div>
-<p>Reweights observations so treated and control groups have balanced covariate distributions, mimicking randomization.</p>
+<h3>What is IPTW?</h3>
+<p><strong>Problem:</strong> Treatment assignment is non-random; treated and control groups differ on observed confounders (e.g., volunteers for training differ systematically from non-volunteers).</p>
+<p><strong>Solution:</strong> Reweight observations so treated and control groups have balanced covariate distributions, mimicking randomization.</p>
 <ul>
-<li><strong>Upweights</strong> individuals who were unlikely to receive the treatment they got</li>
-<li><strong>Downweights</strong> those who were likely to receive it</li>
+<li><strong>Upweights</strong> individuals whose treatment status was "surprising" given their characteristics (treated people who looked like controls, control people who looked like treated)</li>
+<li><strong>Downweights</strong> individuals whose treatment status was "expected" given their characteristics</li>
 </ul>
-</div>
-</div>
-<div class="return-toc">
-<button class="return-btn" data-slide="0">← Return to Table of Contents</button>
-</div>
-</div>
-<!-- Slide 4: ATE Weights -->
-<div class="slide">
-<span class="tag tag-weighting">Weighting</span>
-<h2>ATE Weights</h2>
+<div class="tip">
+<strong>Result:</strong> Both groups are reweighted to represent the same underlying population, creating covariate balance.
+            </div>
 <hr class="divider"/>
-<div class="row">
-<div class="col">
-<div class="section-label">Problem It Solves</div>
-<p>You want to estimate the effect of treatment across the <strong>full population</strong>, not just those who were treated.</p>
-<div class="section-label">Example</div>
-<p>Deciding whether to mandate a program for all individuals.</p>
-</div>
-<div class="col">
-<div class="section-label">What It Does</div>
-<p>Reweights <strong>both</strong> treated and control groups to represent the full population:</p>
-<ul>
-<li>Treated: \(w_i = 1/\hat{e}_i\)</li>
-<li>Control: \(w_i = 1/(1-\hat{e}_i)\)</li>
-</ul>
+<h3>ATE Weights — Targeting the Full Population</h3>
+<p><strong>Goal:</strong> Estimate the effect of treatment across the <strong>full population</strong>, not just those who were treated (e.g., deciding whether to mandate a program for all individuals).</p>
+<div class="formula-box">
+<strong>ATE Weight Formula:</strong><br/>
+                • Treated: \(w_i = 1/\hat{e}_i\)<br/>
+                • Control: \(w_i = 1/(1-\hat{e}_i)\)
+            </div>
 <div class="note">
-<strong>Contrast with ATT weights:</strong> leave treated unweighted and reweight controls as \(w_i = \hat{e}_i / (1 - \hat{e}_i)\) to match the treated group's covariate distribution.
-                    </div>
-</div>
-</div>
+<strong>Contrast with ATT weights:</strong> ATT (Average Treatment effect on the Treated) leaves treated units unweighted and reweights controls as \(w_i = \hat{e}_i / (1 - \hat{e}_i)\) to match the treated group's covariate distribution. Use ATT when you only care about the effect on those who actually received treatment.
+            </div>
 <div class="return-toc">
 <button class="return-btn" data-slide="0">← Return to Table of Contents</button>
 </div>
 </div>
-<!-- Slide 5: Stabilized Weights -->
-<div class="slide">
-<span class="tag tag-weighting">Weighting</span>
-<h2>Stabilized Weights</h2>
-<hr class="divider"/>
-<div class="row">
-<div class="col">
-<div class="section-label">Problem It Solves</div>
-<p>Extreme weights from rare propensity scores cause high variance and unstable estimates.</p>
-<div class="section-label">Example</div>
-<p>An individual with PS = 0.02 gets weight = 1/0.02 = 50, dominating the analysis.</p>
-</div>
-<div class="col">
-<div class="section-label">What It Does</div>
-<p>Multiplies weights by the marginal treatment probability \(\bar{p}\), reducing the range of weight values while preserving balance:</p>
-<ul>
-<li>Treated: \(w_i^{stab} = \bar{p} \;/\; \hat{e}_i\)</li>
-<li>Control: \(w_i^{stab} = (1 - \bar{p}) \;/\; (1 - \hat{e}_i)\)</li>
-</ul>
-<p>Stabilized weights have mean ≈ 1 instead of being highly variable.</p>
-</div>
-</div>
-<div class="return-toc">
-<button class="return-btn" data-slide="0">← Return to Table of Contents</button>
-</div>
-</div>
-<!-- Slide 6: Trimming & Clipping -->
+<!-- Slide 4: Managing Extreme Weights (Combined: Stabilized + Trimming + Clipping) -->
 <div class="slide">
 <span class="tag tag-variance">Variance Control</span>
-<h2>Weight Trimming &amp; Propensity Score Clipping</h2>
+<h2>Managing Extreme Weights: Three Complementary Techniques</h2>
 <hr class="divider"/>
-<div class="row">
-<div class="col">
-<div class="section-label">Weight Trimming — Problem</div>
-<p>A few individuals with extreme propensity scores produce outlier weights that destabilize estimates.</p>
-<div class="section-label">Example</div>
-<p>One person with PS = 0.001 gets weight = 1000, overwhelming all other observations.</p>
-<div class="section-label">What It Does</div>
-<p>Caps weights at a specified quantile (e.g., 99th percentile). Trades a small bias for substantially reduced variance.</p>
-<div class="note">Best practice: check weight distributions and effective sample size to validate the trim threshold — defaults may not be optimal for your sample.</div>
+<p><strong>The Problem:</strong> Extreme propensity scores (near 0 or 1) produce unstable weights that inflate variance and can dominate the analysis. We use a <strong>three-layer defense</strong>:</p>
+<div class="technique-box">
+<h4>1️⃣ Propensity Score Clipping (First Line of Defense)</h4>
+<p><strong>When:</strong> Before calculating weights</p>
+<p><strong>What:</strong> Restrict propensity scores to a safe range (e.g., [0.01, 0.99] or [0.001, 0.999])</p>
+<p><strong>Why:</strong> Prevents division by values near 0 or 1, which would create infinite or undefined weights</p>
+<div class="formula-box">
+                    Example: PS = 0.0001 → clipped to 0.01 → weight = 1/0.01 = 100 (instead of 10,000)
+                </div>
+<p><strong>Effect:</strong> Prevents numerical overflow; introduces small bias but ensures computational stability</p>
 </div>
-<div class="col">
-<div class="section-label">PS Clipping — Problem</div>
-<p>Division by propensity scores near 0 or 1 produces infinite or undefined weights.</p>
-<div class="section-label">Example</div>
-<p>PS = 0.0000001 → weight = 10,000,000.</p>
-<div class="section-label">What It Does</div>
-<p>Clips propensity scores to a safe range (e.g., [0.000001, 0.999999]) before calculating weights. Prevents numerical overflow and extreme weight values.</p>
+<div class="technique-box">
+<h4>2️⃣ Stabilized Weights (Variance Reduction)</h4>
+<p><strong>When:</strong> During weight calculation</p>
+<p><strong>What:</strong> Multiply weights by the marginal treatment probability \(\bar{p}\)</p>
+<div class="formula-box">
+                    • Treated: \(w_i^{stab} = \bar{p} \;/\; \hat{e}_i\)<br/>
+                    • Control: \(w_i^{stab} = (1 - \bar{p}) \;/\; (1 - \hat{e}_i)\)
+                </div>
+<p><strong>Why:</strong> Reduces the range of weight values while preserving balance; stabilized weights have mean ≈ 1</p>
+<p><strong>Effect:</strong> Mathematical rescaling that makes weights more manageable; <strong>no bias introduced</strong>, preserves relative weighting</p>
 </div>
+<div class="technique-box">
+<h4>3️⃣ Weight Trimming/Winsorization (Final Safety Net)</h4>
+<p><strong>When:</strong> After weights are calculated</p>
+<p><strong>What:</strong> Cap weights at a specified quantile (e.g., 99th percentile)</p>
+<p><strong>Why:</strong> A few extreme weights can still destabilize estimates even after clipping and stabilization</p>
+<div class="formula-box">
+                    Example: Weights [0.5, 0.8, 1.2, 2.0, 15.0, 20.0] → trim at 99th → [0.5, 0.8, 1.2, 2.0, 15.0, 15.0]
+                </div>
+<p><strong>Effect:</strong> Trades small bias for substantial variance reduction; observations remain in analysis with capped weights</p>
 </div>
+<div class="tip">
+<strong>How They Work Together:</strong> Clipping prevents catastrophic failures → Stabilization reduces baseline variance → Trimming handles any remaining outliers. This layered approach is best practice for robust IPTW estimation.
+            </div>
 <div class="return-toc">
 <button class="return-btn" data-slide="0">← Return to Table of Contents</button>
 </div>
 </div>
-<!-- Slide 7: GEE Clustering -->
+<!-- Slide 5: GEE Clustering + Sandwich SEs (Combined) -->
 <div class="slide">
-<span class="tag tag-clustering">Clustering</span>
-<h2>GEE Clustering</h2>
+<span class="tag tag-clustering">Clustering &amp; Robustness</span>
+<h2>GEE Clustering &amp; Sandwich Standard Errors</h2>
 <hr class="divider"/>
 <div class="row">
 <div class="col">
+<h3>GEE Clustering</h3>
 <div class="section-label">Problem It Solves</div>
-<p>Observations within groups (teams) are not independent; teammates share common shocks and environments.</p>
-<div class="section-label">Example</div>
-<p>Individuals under the same manager have correlated outcomes due to shared leadership style, team culture, and workload.</p>
-</div>
-<div class="col">
+<p>Observations within groups (teams) are not independent; teammates share common shocks and environments (e.g., same manager, team culture, workload).</p>
 <div class="section-label">What It Does</div>
-<p>Models within-cluster correlation structure and adjusts coefficient estimation accordingly:</p>
 <ul>
+<li>Models within-cluster correlation structure</li>
 <li>Produces <strong>population-averaged (marginal) effects</strong> rather than cluster-specific effects</li>
 <li>Prevents <strong>underestimation of standard errors</strong></li>
-<li>Clustering specified at the <strong>team level</strong> (by direct manager ID)</li>
+<li>Clustering specified at the <strong>team level</strong> </li>
 </ul>
 <div class="note">Rule of thumb: at least 30–50 clusters recommended. For fewer clusters, consider bootstrapping standard errors.</div>
 </div>
-</div>
-<div class="return-toc">
-<button class="return-btn" data-slide="0">← Return to Table of Contents</button>
-</div>
-</div>
-<!-- Slide 8: Sandwich SEs -->
-<div class="slide">
-<span class="tag tag-robustness">Robustness</span>
-<h2>Sandwich (Robust) Standard Errors</h2>
-<hr class="divider"/>
-<div class="row">
 <div class="col">
+<h3>Sandwich (Robust) Standard Errors</h3>
 <div class="section-label">Problem It Solves</div>
-<p>Model assumptions about variance structure may be wrong (heteroskedasticity, misspecified correlation).</p>
-<div class="section-label">Example</div>
-<p>You assumed exchangeable correlation within teams, but the true correlation structure is more complex.</p>
-</div>
-<div class="col">
+<p>Model assumptions about variance structure may be wrong (heteroskedasticity, misspecified correlation structure).</p>
 <div class="section-label">What It Does</div>
-<p>Uses observed residuals to empirically estimate the true variance, producing standard errors that are valid even if variance assumptions are violated.</p>
 <ul>
+<li>Uses observed residuals to empirically estimate the true variance</li>
+<li>Produces standard errors that are valid even if variance assumptions are violated</li>
 <li>Makes GEE <strong>robust to misspecification</strong> of the working correlation structure</li>
 </ul>
-<div class="note">SEs do <strong>not</strong> account for first-stage propensity score estimation uncertainty. Consider cluster bootstrap for fully valid inference.</div>
+<div class="note"><strong>Important:</strong> Sandwich SEs do <strong>not</strong> account for first-stage propensity score estimation uncertainty. Consider cluster bootstrap for fully valid inference.</div>
 </div>
 </div>
+<div class="tip">
+<strong>Why Both?</strong> GEE clustering handles within-team correlation; sandwich SEs protect against misspecification of that correlation structure. Together, they provide robust inference in the presence of clustered data.
+            </div>
 <div class="return-toc">
 <button class="return-btn" data-slide="0">← Return to Table of Contents</button>
 </div>
 </div>
-<!-- Slide 9: IPTW + Covariate Adjustment -->
+<!-- Slide 6: IPTW + Covariate Adjustment -->
 <div class="slide">
 <span class="tag tag-robustness">Model Robustness</span>
 <h2>IPTW + Covariate Adjustment</h2>
@@ -12719,7 +12676,7 @@ OVERALL STEP 2 SUMMARY: ESTIMAND SELECTION GUIDANCE
 <button class="return-btn" data-slide="0">← Return to Table of Contents</button>
 </div>
 </div>
-<!-- Slide 10: Multiple Testing -->
+<!-- Slide 7: Multiple Testing -->
 <div class="slide">
 <span class="tag tag-inference">Inference</span>
 <h2>Multiple Testing Correction (FDR)</h2>
@@ -12737,6 +12694,7 @@ OVERALL STEP 2 SUMMARY: ESTIMAND SELECTION GUIDANCE
 <ul>
 <li>Controls the expected proportion of <strong>false discoveries</strong> among rejected hypotheses</li>
 <li>Applied <strong>across outcomes</strong></li>
+<li>More powerful than Bonferroni correction while still controlling false discovery rate</li>
 </ul>
 </div>
 </div>
@@ -12748,7 +12706,7 @@ OVERALL STEP 2 SUMMARY: ESTIMAND SELECTION GUIDANCE
 <div class="progress" id="progress3"></div>
 <div class="controls">
 <button class="nav-btn3" data-dir="-1">← Previous</button>
-<span id="counter3">1 / 10</span>
+<span id="counter3">1 / 7</span>
 <button class="nav-btn3" data-dir="1">Next →</button>
 </div>
 </div>
